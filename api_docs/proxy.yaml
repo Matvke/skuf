@@ -1,0 +1,1029 @@
+openapi: 3.0.3
+info:
+  title: Sanitizer Proxy API
+  description: |
+    API Go Proxy сервера.
+    
+    Proxy выполняет две роли:
+    1. Проксирование — перехват HTTP-запросов к LLM, 
+       санитайзинг через Engine, пересылка в LLM API.
+    2. Управление targets — CRUD конфигураций LLM-эндпоинтов.
+    
+    Proxy — "тупой шлюз". Не знает про детекторы, профили, ПДн.
+    Знает только куда проксировать и откуда извлекать текст.
+  version: 1.0.0
+  contact:
+    name: Sanitizer Team
+
+servers:
+  - url: http://proxy:8080
+    description: Основной порт прокси
+
+tags:
+  - name: LLM Proxy
+    description: |
+      Проксирование запросов к LLM.
+      Эти эндпоинты вызываются сотрудниками (или демо-чатом).
+      Пути динамические — зависят от настроенных targets.
+  - name: Targets
+    description: |
+      CRUD конфигураций LLM-эндпоинтов.
+      Вызывается Frontend для управления targets.
+  - name: Health
+    description: Проверка состояния сервиса
+
+
+# ============================================================
+#  ПУТИ (ENDPOINTS)
+# ============================================================
+
+paths:
+
+  # ----------------------------------------------------------
+  #  LLM PROXY — проксирование запросов
+  # ----------------------------------------------------------
+
+  /proxy/{target_name}/{path}:
+    post:
+      tags: [LLM Proxy]
+      summary: Проксирование запроса к LLM
+      description: |
+        Основной эндпоинт. Сотрудник (или демо-чат) отправляет
+        запрос сюда вместо прямого обращения к LLM API.
+
+        Proxy:
+        1. Определяет target по {target_name} из URL
+        2. Находит route по {path}
+        3. Извлекает тексты из JSON по extract_fields
+        4. Отправляет в Engine POST /sanitize
+        5. Получает action (send / block)
+        6. send → подставляет очищенный текст, пересылает в LLM
+        7. block → возвращает ошибку сотруднику
+
+        Пример URL:
+          POST /proxy/openai/v1/chat/completions
+          POST /proxy/anthropic/v1/messages
+          POST /proxy/ollama/api/chat
+      operationId: proxyRequest
+      parameters:
+        - name: target_name
+          in: path
+          required: true
+          schema:
+            type: string
+          description: |
+            Имя target (LLM-эндпоинта).
+            Определяет куда проксировать и как парсить JSON.
+          examples:
+            openai:
+              value: "openai"
+            anthropic:
+              value: "anthropic"
+            ollama:
+              value: "ollama_local"
+
+        - name: path
+          in: path
+          required: true
+          schema:
+            type: string
+          description: |
+            Путь запроса к LLM API.
+            Proxy сопоставляет его с routes в конфигурации target.
+          examples:
+            chat:
+              value: "v1/chat/completions"
+            messages:
+              value: "v1/messages"
+
+        - name: X-Sanitizer-Profile
+          in: header
+          required: false
+          schema:
+            type: string
+          description: |
+            Имя профиля санитайзинга.
+            Если не указан — используется default_profile из target.
+          example: "finance"
+
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: |
+                Тело запроса в формате целевого LLM API.
+                Proxy не валидирует структуру — он только извлекает
+                текст из полей, указанных в extract_fields конфигурации target.
+            examples:
+              openai_chat:
+                summary: Запрос к OpenAI Chat
+                value:
+                  model: "gpt-4"
+                  messages:
+                    - role: "system"
+                      content: "Ты помощник финансового отдела"
+                    - role: "user"
+                      content: "Напиши письмо Иванову Петру, тел +7 916 123-45-67"
+                  stream: false
+
+              openai_chat_stream:
+                summary: Запрос к OpenAI Chat (стриминг)
+                value:
+                  model: "gpt-4"
+                  messages:
+                    - role: "user"
+                      content: "Напиши письмо Иванову Петру"
+                  stream: true
+
+              anthropic_message:
+                summary: Запрос к Anthropic Claude
+                value:
+                  model: "claude-3-sonnet-20240229"
+                  max_tokens: 1024
+                  system: "Ты помощник"
+                  messages:
+                    - role: "user"
+                      content: "Позвони Иванову: +7 916 123-45-67"
+
+              ollama_chat:
+                summary: Запрос к Ollama
+                value:
+                  model: "llama3"
+                  messages:
+                    - role: "user"
+                      content: "Проверь данные клиента Иванова"
+
+              ollama_generate:
+                summary: Запрос к Ollama (generate)
+                value:
+                  model: "llama3"
+                  prompt: "Напиши письмо Иванову Петру Сергеевичу"
+
+      responses:
+        '200':
+          description: |
+            Ответ от LLM API (проксирован без изменений).
+            Формат зависит от LLM-провайдера.
+          content:
+            application/json:
+              schema:
+                type: object
+                description: Ответ LLM API (формат зависит от провайдера)
+              examples:
+                openai_response:
+                  summary: Ответ OpenAI
+                  value:
+                    id: "chatcmpl-abc123"
+                    object: "chat.completion"
+                    choices:
+                      - index: 0
+                        message:
+                          role: "assistant"
+                          content: "Уважаемый [PERSON], по номеру +7 *** ***-**-67..."
+                        finish_reason: "stop"
+                    usage:
+                      prompt_tokens: 25
+                      completion_tokens: 50
+                      total_tokens: 75
+
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  SSE-поток (Server-Sent Events).
+                  Proxy пробрасывает чанки от LLM как есть.
+              examples:
+                sse_stream:
+                  summary: SSE-стрим OpenAI
+                  value: |
+                    data: {"choices":[{"delta":{"content":"Уваж"}}]}
+                    
+                    data: {"choices":[{"delta":{"content":"аемый"}}]}
+                    
+                    data: {"choices":[{"delta":{"content":" [PERSON]"}}]}
+                    
+                    data: [DONE]
+
+        '403':
+          description: |
+            Запрос заблокирован Engine (mode=block, найдены данные).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyBlockResponse'
+              example:
+                error: "request_blocked"
+                message: "Запрос заблокирован. Обнаружены чувствительные данные."
+                block_reason: "Обнаружены: ФИО (1), телефон (1)"
+                detections:
+                  - type: "person_name"
+                    count: 1
+                  - type: "phone_ru"
+                    count: 1
+
+        '404':
+          description: Target не найден или route не совпал
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+              examples:
+                target_not_found:
+                  summary: Target не найден
+                  value:
+                    error: "target_not_found"
+                    message: "Target 'unknown' не найден"
+                route_not_found:
+                  summary: Route не найден — проксирование как есть
+                  value:
+                    error: "route_not_matched"
+                    message: "Путь 'v1/models' не совпал ни с одним route. Запрос проксирован без санитайзинга."
+
+        '502':
+          description: LLM API недоступен
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+              example:
+                error: "llm_unavailable"
+                message: "Не удалось подключиться к https://api.openai.com"
+
+        '503':
+          description: Engine недоступен (политика strict — запрос не отправлен)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+              example:
+                error: "engine_unavailable"
+                message: "Sanitize Engine недоступен. Запрос не отправлен (политика strict)."
+
+        '504':
+          description: Таймаут ожидания LLM API или Engine
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+              example:
+                error: "timeout"
+                message: "Превышено время ожидания ответа от LLM API"
+
+
+  # ----------------------------------------------------------
+  #  TARGETS — управление конфигурациями LLM-эндпоинтов
+  # ----------------------------------------------------------
+
+  /config/targets:
+    get:
+      tags: [Targets]
+      summary: Список всех targets
+      description: |
+        Возвращает все сконфигурированные LLM-эндпоинты.
+        Используется Frontend для страницы управления targets.
+      operationId: listTargets
+      responses:
+        '200':
+          description: Список targets
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TargetSummary'
+              example:
+                - name: "openai"
+                  description: "OpenAI ChatGPT API"
+                  base_url: "https://api.openai.com"
+                  route_count: 1
+                  default_profile: "general"
+                  is_default: true
+                  created_at: "2024-03-01T10:00:00Z"
+                  updated_at: "2024-03-01T10:00:00Z"
+                - name: "anthropic"
+                  description: "Anthropic Claude API"
+                  base_url: "https://api.anthropic.com"
+                  route_count: 1
+                  default_profile: "general"
+                  is_default: false
+                  created_at: "2024-03-05T12:00:00Z"
+                  updated_at: "2024-03-05T12:00:00Z"
+                - name: "ollama_local"
+                  description: "Локальная Ollama"
+                  base_url: "http://10.0.0.5:11434"
+                  route_count: 2
+                  default_profile: "local_llm"
+                  is_default: false
+                  created_at: "2024-03-07T09:00:00Z"
+                  updated_at: "2024-03-10T14:00:00Z"
+
+    post:
+      tags: [Targets]
+      summary: Создать новый target
+      operationId: createTarget
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TargetCreate'
+            examples:
+              openai:
+                summary: OpenAI
+                value:
+                  name: "openai"
+                  description: "OpenAI ChatGPT API"
+                  base_url: "https://api.openai.com"
+                  default_profile: "general"
+                  is_default: true
+                  auth:
+                    type: "bearer"
+                    pass_through: true
+                  routes:
+                    - path: "/v1/chat/completions"
+                      method: "POST"
+                      extract_fields:
+                        - json_path: "messages[*].content"
+                          filter:
+                            field: "role"
+                            values: ["user", "system"]
+                      stream_field: "stream"
+
+              anthropic:
+                summary: Anthropic Claude
+                value:
+                  name: "anthropic"
+                  description: "Anthropic Claude API"
+                  base_url: "https://api.anthropic.com"
+                  default_profile: "general"
+                  is_default: false
+                  auth:
+                    type: "header"
+                    header_name: "x-api-key"
+                    pass_through: true
+                  routes:
+                    - path: "/v1/messages"
+                      method: "POST"
+                      extract_fields:
+                        - json_path: "messages[*].content"
+                          filter:
+                            field: "role"
+                            values: ["user"]
+                        - json_path: "system"
+                      stream_field: "stream"
+
+              ollama:
+                summary: Ollama (self-hosted)
+                value:
+                  name: "ollama_local"
+                  description: "Локальная Ollama"
+                  base_url: "http://10.0.0.5:11434"
+                  default_profile: "local_llm"
+                  is_default: false
+                  auth:
+                    type: "none"
+                  routes:
+                    - path: "/api/chat"
+                      method: "POST"
+                      extract_fields:
+                        - json_path: "messages[*].content"
+                      stream_field: "stream"
+                    - path: "/api/generate"
+                      method: "POST"
+                      extract_fields:
+                        - json_path: "prompt"
+                      stream_field: "stream"
+
+              custom:
+                summary: Кастомный внутренний сервис
+                value:
+                  name: "internal_ai"
+                  description: "Внутренний AI-ассистент"
+                  base_url: "http://ai.internal.company.ru:8000"
+                  default_profile: "general"
+                  is_default: false
+                  auth:
+                    type: "none"
+                  routes:
+                    - path: "/ask"
+                      method: "POST"
+                      extract_fields:
+                        - json_path: "question"
+                        - json_path: "context"
+                      stream_field: null
+                    - path: "/summarize"
+                      method: "POST"
+                      extract_fields:
+                        - json_path: "text"
+                      stream_field: null
+
+      responses:
+        '201':
+          description: Target создан
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Target'
+        '409':
+          description: Target с таким именем уже существует
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+              example:
+                error: "conflict"
+                message: "Target 'openai' уже существует"
+        '422':
+          description: Невалидные данные
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+              examples:
+                invalid_url:
+                  summary: Невалидный URL
+                  value:
+                    error: "validation_error"
+                    message: "Поле 'base_url' должно быть валидным URL"
+                empty_routes:
+                  summary: Пустые маршруты
+                  value:
+                    error: "validation_error"
+                    message: "Target должен содержать хотя бы один route"
+                invalid_json_path:
+                  summary: Невалидный JSON path
+                  value:
+                    error: "validation_error"
+                    message: "Невалидный json_path 'messages..content' в route '/v1/chat/completions'"
+
+
+  /config/targets/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Имя target
+        example: "openai"
+
+    get:
+      tags: [Targets]
+      summary: Получить target по имени
+      description: |
+        Полная информация о target, включая все routes
+        и extract_fields. Используется Frontend для
+        страницы редактирования target.
+      operationId: getTarget
+      responses:
+        '200':
+          description: Полная информация о target
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Target'
+              example:
+                name: "openai"
+                description: "OpenAI ChatGPT API"
+                base_url: "https://api.openai.com"
+                default_profile: "general"
+                is_default: true
+                auth:
+                  type: "bearer"
+                  pass_through: true
+                routes:
+                  - path: "/v1/chat/completions"
+                    method: "POST"
+                    extract_fields:
+                      - json_path: "messages[*].content"
+                        filter:
+                          field: "role"
+                          values: ["user", "system"]
+                    stream_field: "stream"
+                created_at: "2024-03-01T10:00:00Z"
+                updated_at: "2024-03-01T10:00:00Z"
+        '404':
+          description: Target не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+
+    put:
+      tags: [Targets]
+      summary: Обновить target
+      operationId: updateTarget
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TargetUpdate'
+            example:
+              description: "OpenAI ChatGPT API (обновлённый)"
+              base_url: "https://api.openai.com"
+              default_profile: "finance"
+              auth:
+                type: "bearer"
+                pass_through: true
+              routes:
+                - path: "/v1/chat/completions"
+                  method: "POST"
+                  extract_fields:
+                    - json_path: "messages[*].content"
+                      filter:
+                        field: "role"
+                        values: ["user", "system"]
+                  stream_field: "stream"
+      responses:
+        '200':
+          description: Target обновлён
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Target'
+        '404':
+          description: Target не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '422':
+          description: Невалидные данные
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+
+    delete:
+      tags: [Targets]
+      summary: Удалить target
+      operationId: deleteTarget
+      responses:
+        '204':
+          description: Target удалён
+        '404':
+          description: Target не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '409':
+          description: Нельзя удалить target по умолчанию
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+              example:
+                error: "conflict"
+                message: "Нельзя удалить target по умолчанию 'openai'. Сначала назначьте другой target по умолчанию."
+
+
+  /config/targets/{name}/test:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+        example: "openai"
+
+    post:
+      tags: [Targets]
+      summary: Проверить подключение к target
+      description: |
+        Отправляет тестовый запрос к base_url target,
+        чтобы проверить доступность LLM API.
+        Не отправляет никаких данных, только проверяет соединение.
+      operationId: testTarget
+      responses:
+        '200':
+          description: Подключение успешно
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TargetTestResult'
+              example:
+                status: "ok"
+                base_url: "https://api.openai.com"
+                response_time_ms: 145
+                message: "Подключение успешно"
+        '502':
+          description: Не удалось подключиться
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TargetTestResult'
+              example:
+                status: "error"
+                base_url: "http://10.0.0.5:11434"
+                response_time_ms: null
+                message: "Не удалось подключиться: connection refused"
+
+
+  # ----------------------------------------------------------
+  #  HEALTH
+  # ----------------------------------------------------------
+
+  /health:
+    get:
+      tags: [Health]
+      summary: Проверка состояния Proxy
+      description: |
+        Проверяет:
+        - Proxy работает
+        - Engine доступен
+        - Targets загружены
+      operationId: healthCheck
+      responses:
+        '200':
+          description: Proxy работает
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyHealthResponse'
+              examples:
+                healthy:
+                  summary: Всё работает
+                  value:
+                    status: "ok"
+                    version: "1.0.0"
+                    engine:
+                      status: "ok"
+                      url: "http://engine:8081"
+                      response_time_ms: 5
+                    targets_loaded: 3
+                    uptime_seconds: 7200
+                degraded:
+                  summary: Engine недоступен
+                  value:
+                    status: "degraded"
+                    version: "1.0.0"
+                    engine:
+                      status: "unavailable"
+                      url: "http://engine:8081"
+                      response_time_ms: null
+                    targets_loaded: 3
+                    uptime_seconds: 7200
+
+
+# ============================================================
+#  МОДЕЛИ ДАННЫХ (SCHEMAS)
+# ============================================================
+
+components:
+  schemas:
+
+    # --------------------------------------------------------
+    #  TARGETS
+    # --------------------------------------------------------
+
+    TargetSummary:
+      type: object
+      properties:
+        name:
+          type: string
+          example: "openai"
+        description:
+          type: string
+          example: "OpenAI ChatGPT API"
+        base_url:
+          type: string
+          format: uri
+          example: "https://api.openai.com"
+        route_count:
+          type: integer
+          description: Количество настроенных маршрутов
+          example: 1
+        default_profile:
+          type: string
+          description: Профиль по умолчанию для этого target
+          example: "general"
+        is_default:
+          type: boolean
+          description: |
+            Является ли target по умолчанию.
+            Используется если target не указан явно.
+          example: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    Target:
+      type: object
+      required: [name, base_url, routes]
+      properties:
+        name:
+          type: string
+          pattern: '^[a-z][a-z0-9_]{2,49}$'
+          description: |
+            Уникальное имя target.
+            Используется в URL: /proxy/{target_name}/...
+          example: "openai"
+        description:
+          type: string
+          maxLength: 200
+          example: "OpenAI ChatGPT API"
+        base_url:
+          type: string
+          format: uri
+          description: URL LLM API, куда проксировать запросы
+          example: "https://api.openai.com"
+        default_profile:
+          type: string
+          description: |
+            Профиль санитайзинга по умолчанию.
+            Используется если клиент не передал X-Sanitizer-Profile.
+          example: "general"
+        is_default:
+          type: boolean
+          description: Target по умолчанию (один на систему)
+          default: false
+        auth:
+          $ref: '#/components/schemas/TargetAuth'
+        routes:
+          type: array
+          items:
+            $ref: '#/components/schemas/Route'
+          minItems: 1
+          description: Маршруты для перехвата и санитайзинга
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    TargetCreate:
+      type: object
+      required: [name, base_url, routes]
+      properties:
+        name:
+          type: string
+          pattern: '^[a-z][a-z0-9_]{2,49}$'
+        description:
+          type: string
+          maxLength: 200
+        base_url:
+          type: string
+          format: uri
+        default_profile:
+          type: string
+          default: "general"
+        is_default:
+          type: boolean
+          default: false
+        auth:
+          $ref: '#/components/schemas/TargetAuth'
+        routes:
+          type: array
+          items:
+            $ref: '#/components/schemas/Route'
+          minItems: 1
+
+    TargetUpdate:
+      type: object
+      properties:
+        description:
+          type: string
+          maxLength: 200
+        base_url:
+          type: string
+          format: uri
+        default_profile:
+          type: string
+        is_default:
+          type: boolean
+        auth:
+          $ref: '#/components/schemas/TargetAuth'
+        routes:
+          type: array
+          items:
+            $ref: '#/components/schemas/Route'
+          minItems: 1
+
+    TargetAuth:
+      type: object
+      description: |
+        Настройки аутентификации при обращении к LLM API.
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [none, bearer, header]
+          description: |
+            Тип аутентификации:
+            - none   — без аутентификации (Ollama)
+            - bearer — Authorization: Bearer ... (OpenAI)
+            - header — кастомный заголовок (Anthropic: x-api-key)
+          example: "bearer"
+        header_name:
+          type: string
+          description: |
+            Имя заголовка (для type=header).
+            Например "x-api-key" для Anthropic.
+          example: "x-api-key"
+        pass_through:
+          type: boolean
+          description: |
+            Пробрасывать ли аутентификацию клиента в LLM API.
+            true  — Proxy берёт Authorization из запроса сотрудника
+                    и передаёт в LLM API как есть.
+                    Каждый сотрудник использует свой ключ.
+            false — Proxy использует свой ключ (хранится в env).
+          default: true
+
+    Route:
+      type: object
+      required: [path, method, extract_fields]
+      properties:
+        path:
+          type: string
+          description: |
+            Путь эндпоинта LLM API, который нужно перехватывать.
+            Должен начинаться с "/".
+          example: "/v1/chat/completions"
+        method:
+          type: string
+          enum: [POST, PUT, PATCH]
+          default: "POST"
+          description: HTTP-метод
+          example: "POST"
+        extract_fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExtractField'
+          minItems: 1
+          description: |
+            Откуда извлекать текст для санитайзинга.
+            Каждый элемент — правило извлечения из JSON.
+        stream_field:
+          type: string
+          nullable: true
+          description: |
+            Имя поля в JSON, которое указывает на стриминг.
+            Если это поле = true, Proxy пробрасывает ответ 
+            как SSE-стрим.
+            null — стриминг не поддерживается для этого route.
+          example: "stream"
+
+    ExtractField:
+      type: object
+      required: [json_path]
+      properties:
+        json_path:
+          type: string
+          description: |
+            Путь к полю в JSON-теле запроса.
+            Поддерживаемые форматы:
+            
+            "prompt"                — простое поле верхнего уровня
+            "system"                — простое поле верхнего уровня
+            "messages[*].content"   — поле content в каждом элементе массива messages
+            "input.text"            — вложенное поле
+          example:
+            simple:
+              value: "prompt"
+            array:
+              value: "messages[*].content"
+            nested:
+              value: "system"
+        filter:
+          $ref: '#/components/schemas/ExtractFilter'
+
+    ExtractFilter:
+      type: object
+      nullable: true
+      description: |
+        Фильтр для массивов. Позволяет извлекать текст только
+        из элементов, где определённое поле имеет заданное значение.
+        
+        Пример: извлекать content только из сообщений 
+        где role = "user" или role = "system".
+      properties:
+        field:
+          type: string
+          description: Поле для фильтрации
+          example: "role"
+        values:
+          type: array
+          items:
+            type: string
+          description: Допустимые значения
+          example: ["user", "system"]
+
+
+    # --------------------------------------------------------
+    #  PROXY RESPONSES
+    # --------------------------------------------------------
+
+    ProxyBlockResponse:
+      type: object
+      description: |
+        Ответ Proxy когда Engine заблокировал запрос.
+        Возвращается сотруднику вместо ответа LLM.
+      properties:
+        error:
+          type: string
+          example: "request_blocked"
+        message:
+          type: string
+          example: "Запрос заблокирован. Обнаружены чувствительные данные."
+        block_reason:
+          type: string
+          example: "Обнаружены: ФИО (1), телефон (1)"
+        detections:
+          type: array
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+                example: "person_name"
+              count:
+                type: integer
+                example: 1
+
+    ProxyError:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          description: Машиночитаемый код ошибки
+          enum:
+            - target_not_found
+            - route_not_matched
+            - engine_unavailable
+            - llm_unavailable
+            - timeout
+            - validation_error
+            - conflict
+          example: "engine_unavailable"
+        message:
+          type: string
+          description: Человекочитаемое описание
+          example: "Sanitize Engine недоступен"
+
+    TargetTestResult:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok, error]
+          example: "ok"
+        base_url:
+          type: string
+          example: "https://api.openai.com"
+        response_time_ms:
+          type: integer
+          nullable: true
+          example: 145
+        message:
+          type: string
+          example: "Подключение успешно"
+
+
+    # --------------------------------------------------------
+    #  HEALTH
+    # --------------------------------------------------------
+
+    ProxyHealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+          description: |
+            ok       — всё работает
+            degraded — Proxy работает, но Engine недоступен
+          example: "ok"
+        version:
+          type: string
+          example: "1.0.0"
+        engine:
+          type: object
+          properties:
+            status:
+              type: string
+              enum: [ok, unavailable]
+              example: "ok"
+            url:
+              type: string
+              example: "http://engine:8081"
+            response_time_ms:
+              type: integer
+              nullable: true
+              example: 5
+        targets_loaded:
+          type: integer
+          description: Количество загруженных targets
+          example: 3
+        uptime_seconds:
+          type: integer
+          example: 7200
