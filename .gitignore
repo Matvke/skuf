@@ -23,4 +23,5 @@ env/
 .env.local
 .env
 *.key
-*.pem
+*.pem.
+python-version
