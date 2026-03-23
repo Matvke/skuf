@@ -1,10 +1,12 @@
 from fastapi import APIRouter
-from scheams.processing import ProcessingBody
+
+from scheams.processing_schemas import ProcessingBody
+from services.processing_service import NameExtractor
 
 processing_router = APIRouter(prefix="/processing")
 
 
 @processing_router.post("/")
 async def processing(body: ProcessingBody):
-    body.text = "Anonymous text"
-    return body
+    processor = NameExtractor()
+    return processor.extract_with_positions(body.text)
