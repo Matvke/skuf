@@ -11,13 +11,13 @@ type Handler struct {
 	engineClient *client.EngineClient
 }
 
-func NewHandler(client *client.EngineClient) *Handler {
-	return &Handler{
+func NewHandler(client *client.EngineClient) Handler {
+	return Handler{
 		engineClient: client,
 	}
 }
 
-func (h *Handler) EngineHandler(w http.ResponseWriter, r *http.Request) {
+func (h Handler) EngineHandler(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "failed to read body", http.StatusBadRequest)
@@ -33,5 +33,4 @@ func (h *Handler) EngineHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	w.Write(engineBody)
-
 }

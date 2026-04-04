@@ -1,0 +1,32 @@
+port: 8080
+engine_url: "http://localhost:8090"
+reload_debounce_ms: 500
+
+targets:
+  - name: openai-chat
+    match:
+      host: "api.openai.com"
+      path: "/v1/chat/completions"
+      methods: ["POST"]
+    upstream:
+      scheme: "https"
+      host: "api.openai.com"
+      path: "/v1/chat/completions"
+    profile: "default"
+    extract:
+      json_paths:
+        - "messages[*].content"
+
+  - name: anthropic-messages
+    match:
+      host: "api.anthropic.com"
+      path: "/v1/messages"
+      methods: ["POST"]
+    upstream:
+      scheme: "https"
+      host: "api.anthropic.com"
+      path: "/v1/messages"
+    profile: "default"
+    extract:
+      json_paths:
+        - "messages[*].content"
