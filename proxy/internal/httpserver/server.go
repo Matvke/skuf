@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/Matvke/skuf/internal/config"
+	"github.com/Matvke/skuf/internal/routing"
 )
 
 type Server struct {
@@ -44,6 +45,41 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCatchAll(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfgStore.Get()
 
+	target := routing.Match(cfg, r)
+
+	if target == nil {
+		slog.LogAttrs(
+			context.Background(),
+			slog.LevelInfo,
+			"unmatched target",
+			slog.Bool("matched", false),
+		)
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"matched": false,
+		})
+	} else {
+		slog.LogAttrs(
+			context.Background(),
+			slog.LevelInfo,
+			"matched target",
+			slog.String("target", target.Name),
+			slog.Bool("matched", true),
+			slog.String("upstream_url", target.UpstreamURL),
+		)
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"matched":      true,
+			"target":       target.Name,
+			"upstream_url": target.UpstreamURL,
+			"method":       r.Method,
+			"host":         r.Host,
+			"path":         r.URL.Path,
+		})
+	}
+
 	slog.LogAttrs(
 		context.TODO(),
 		slog.LevelInfo,
@@ -53,12 +89,4 @@ func (s *Server) handleCatchAll(w http.ResponseWriter, r *http.Request) {
 		slog.String("path", r.URL.Path),
 		slog.Int("targets", len(cfg.Targets)),
 	)
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"message": "proxy skeleton is working",
-		"method":  r.Method,
-		"host":    r.Host,
-		"path":    r.URL.Path,
-	})
 }

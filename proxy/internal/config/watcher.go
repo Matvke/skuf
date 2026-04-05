@@ -38,7 +38,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 	var timerCh <-chan time.Time
 
 	reload := func() {
-		cfg, err := LoadFromFile(w.path)
+		rawCfg, err := LoadFromFile(w.path)
 		if err != nil {
 			slog.LogAttrs(
 				ctx,
@@ -50,11 +50,22 @@ func (w *Watcher) Run(ctx context.Context) error {
 			return
 		}
 
-		if err = Validate(cfg); err != nil {
+		if err = Validate(rawCfg); err != nil {
 			slog.LogAttrs(
 				ctx,
 				slog.LevelError,
 				"config validation failed",
+				slog.Any("error", err),
+			)
+			return
+		}
+
+		cfg, err := Compile(rawCfg)
+		if err != nil {
+			slog.LogAttrs(
+				ctx,
+				slog.LevelError,
+				"cant compile rawConfig",
 				slog.Any("error", err),
 			)
 			return

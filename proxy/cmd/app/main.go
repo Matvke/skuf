@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"log/slog"
 	"net/http"
 	"os/signal"
 	"syscall"
@@ -15,13 +16,18 @@ import (
 func main() {
 	configPath := "configs/config.yaml"
 
-	cfg, err := config.LoadFromFile(configPath)
+	rawCfg, err := config.LoadFromFile(configPath)
 	if err != nil {
 		log.Fatalf("failed loading config: %v", err)
 	}
 
-	if err = config.Validate(cfg); err != nil {
+	if err = config.Validate(rawCfg); err != nil {
 		log.Fatalf("failed validating config: %v", err)
+	}
+
+	cfg, err := config.Compile(rawCfg)
+	if err != nil {
+		log.Fatalf("failed compiling rawConfig: %v", err)
 	}
 
 	store := config.NewStore(cfg)
@@ -60,5 +66,5 @@ func main() {
 		log.Printf("http shutdown error: %v", err)
 	}
 
-	log.Println("server stopped")
+	slog.Info("server stopped")
 }

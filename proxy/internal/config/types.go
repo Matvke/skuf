@@ -30,3 +30,20 @@ type RawUpstream struct {
 type Extractor struct {
 	JSONPaths []string `yaml:"json_paths"`
 }
+
+type Config struct {
+	Port             int
+	EngineUrl        string
+	ReloadDebounceMS int
+	Targets          []Target
+}
+
+type Target struct {
+	Name        string
+	Profile     string
+	MatchHost   string
+	MatchPath   string
+	Methods     map[string]struct{}
+	UpstreamURL string
+	JsonPaths   []string
+}
