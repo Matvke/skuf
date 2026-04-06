@@ -1,12 +1,11 @@
+from extractors.entity_extractor import EntityExtractor
 from fastapi import APIRouter
-
 from scheams.processing_schemas import ProcessingBody
-from services.processing_service import NameExtractor
 
 processing_router = APIRouter(prefix="/processing")
 
 
-@processing_router.post("/")
-async def processing(body: ProcessingBody):
-    processor = NameExtractor()
-    return processor.extract_with_positions(body.text)
+@processing_router.post("/entity")
+async def processing_entities(body: ProcessingBody):
+    processor = EntityExtractor()
+    return processor.anonymize(body.text)
