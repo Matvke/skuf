@@ -23,7 +23,7 @@ func Match(cfg *config.Config, r *http.Request) *config.Target {
 			continue
 		}
 
-		if target.UpstreamURL != "" && target.UpstreamURL != requestUrl {
+		if target.UpstreamURL != "" && target.MatchPath != requestUrl {
 			continue
 		}
 

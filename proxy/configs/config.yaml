@@ -5,13 +5,13 @@ reload_debounce_ms: 500
 targets:
   - name: openai-chat
     match:
-      host: "api.openai.com"
-      path: "/v1/chat/completions"
-      methods: ["POST"]
+      host: "localhost:8080"
+      path: "/static"
+      methods: ["POST", "GET"]
     upstream:
-      scheme: "https"
-      host: "api.openai.com"
-      path: "/v1/chat/completions"
+      scheme: "http"
+      host: "localhost:8080"
+      path: "/static"
     profile: "default"
     extract:
       json_paths:
