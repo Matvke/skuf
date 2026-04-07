@@ -83,14 +83,30 @@ func (s *Server) handleCatchAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	values, err := extract.MessagesContent(payload)
-	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"error": err.Error(),
-		})
-		return
+	extracted := make([]extract.Value, 0)
+
+	for _, path := range target.JsonPaths {
+		combinedPath, err := extract.ParsePath(path)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": err.Error(),
+			})
+			return
+		}
+
+		values, err := extract.Extract(payload, *combinedPath)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": err.Error(),
+			})
+			return
+		}
+
+		extracted = append(extracted, values...)
 	}
 
 	slog.LogAttrs(
@@ -112,6 +128,6 @@ func (s *Server) handleCatchAll(w http.ResponseWriter, r *http.Request) {
 		"path":         r.URL.Path,
 		"body_size":    len(data),
 		"json":         "valid",
-		"extracted":    values,
+		"extracted":    extracted,
 	})
 }
