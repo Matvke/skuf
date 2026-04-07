@@ -2,18 +2,18 @@ from extractors import ExtractionPipeline
 from fastapi import APIRouter
 from scheams.processing_schemas import ProcessingBody
 
-processing_router = APIRouter(prefix="/processing")
+anonimization_router = APIRouter(prefix="/anonimization")
 
 
-@processing_router.post("/all")
+@anonimization_router.post("/all")
 async def processing_all(body: ProcessingBody):
     pipeline = ExtractionPipeline.from_registry()
-    result = [pipeline.run(body.text)]
+    result = [pipeline.anonymize(body.text)]
     return result
 
 
-@processing_router.post("/base")
+@anonimization_router.post("/base")
 async def processing_base(body: ProcessingBody):
     pipeline = ExtractionPipeline.from_registry("passport", "inn", "phone")
-    result = [pipeline.run(body.text)]
+    result = [pipeline.anonymize(body.text)]
     return result
