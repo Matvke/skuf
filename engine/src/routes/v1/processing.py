@@ -9,7 +9,9 @@ processing_router = APIRouter(prefix="/processing")
 @processing_router.post(
     "/all",
     description="Возвращает выявленные сущности по всем существующим экстракторам",
-    tags=["processing", "v1"],
+    tags=[
+        "processing",
+    ],
 )
 async def processing_all(body: ProcessingBody) -> list[list[Entity]]:
     pipeline = ExtractionPipeline.from_registry()
@@ -20,7 +22,9 @@ async def processing_all(body: ProcessingBody) -> list[list[Entity]]:
 @processing_router.post(
     "/base",
     description="Возвращает выявленные сущности по экстракторам 'passport', 'inn', 'phone'",
-    tags=["processing", "v1"],
+    tags=[
+        "processing",
+    ],
 )
 async def processing_base(body: ProcessingBody):
     pipeline = ExtractionPipeline.from_registry("passport", "inn", "phone")

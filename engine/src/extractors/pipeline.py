@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .base import BaseExtractor
 from .models import Entity
+from .registry import registry
 
 
 class ExtractionPipeline:
@@ -19,8 +20,6 @@ class ExtractionPipeline:
     @classmethod
     def from_registry(cls, *names: str) -> ExtractionPipeline:
         """Создать пайплайн из зарегистрированных экстракторов."""
-        from .registry import registry
-
         extractors = (
             registry.instantiate(*names) if names else registry.instantiate_all()
         )
