@@ -24,7 +24,7 @@ func New(cfgStore *config.Store) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/healthz", s.handleHealth)
+	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/debug/config", s.handleConfig)
 	mux.HandleFunc("/", s.handleCatchAll)
 
