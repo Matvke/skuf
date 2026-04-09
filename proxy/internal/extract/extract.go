@@ -23,7 +23,7 @@ func Extract(payload any, path CompiledPath) ([]Value, error) {
 
 				field, ok := n[segment.Field]
 				if !ok {
-					return nil, fmt.Errorf("invalid segment field, cant find in map")
+					continue
 				}
 				p := ""
 				if node.Path == "" {
@@ -52,12 +52,14 @@ func Extract(payload any, path CompiledPath) ([]Value, error) {
 		case IndexSegment:
 			for _, node := range current {
 				n, ok := node.Node.([]any)
-				if segment.Index < 0 || segment.Index >= len(n) {
-					return nil, fmt.Errorf("invalid segment index, out of range")
-				}
 				if !ok {
 					continue
 				}
+
+				if segment.Index < 0 || segment.Index >= len(n) {
+					return nil, fmt.Errorf("invalid segment index, out of range")
+				}
+
 				next = append(next, CurrentNode{
 					Node: n[segment.Index],
 					Path: fmt.Sprintf("%s.%d", node.Path, segment.Index),
