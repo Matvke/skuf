@@ -9,8 +9,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Matvke/skuf/internal/client"
 	"github.com/Matvke/skuf/internal/config"
 	"github.com/Matvke/skuf/internal/httpserver"
+	"github.com/Matvke/skuf/internal/upstream"
 )
 
 func main() {
@@ -42,7 +44,10 @@ func main() {
 		}
 	}()
 
-	srv := httpserver.New(store)
+	engineClient := client.NewEngineClient(cfg.EngineUrl)
+	forwarder := upstream.NewForwarder()
+
+	srv := httpserver.New(store, engineClient, forwarder)
 
 	httpServ := &http.Server{
 		Addr:              ":8080",
