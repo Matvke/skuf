@@ -109,6 +109,10 @@ func (s *Server) handleCatchAll(w http.ResponseWriter, r *http.Request) {
 		extracted = append(extracted, values...)
 	}
 
+	for i := 0; i < len(extracted); i++ {
+		//not implemented
+	}
+
 	slog.LogAttrs(
 		r.Context(),
 		slog.LevelInfo,

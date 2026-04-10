@@ -7,12 +7,11 @@ targets:
     match:
       host: "localhost:8080"
       path: "/static"
-      methods: ["POST"]
+      methods: ["POST", "GET"]
     upstream:
       scheme: "http"
       host: "localhost:8080"
       path: "/static"
-    profile: "default"
     extract:
       json_paths:
         - "data.chat.messages[*].parts[*].text"
@@ -26,7 +25,6 @@ targets:
       scheme: "https"
       host: "api.anthropic.com"
       path: "/v1/messages"
-    profile: "default"
     extract:
       json_paths:
         - "messages[*].content"

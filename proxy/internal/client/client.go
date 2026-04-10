@@ -5,8 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"time"
+
+	requestid "github.com/Matvke/skuf/internal/request_id"
 )
 
 type EngineClient struct {
@@ -15,66 +19,81 @@ type EngineClient struct {
 }
 
 func NewEngineClient(baseUrl string) *EngineClient {
+	baseUrl = strings.TrimRight(baseUrl, "/")
 	return &EngineClient{
 		baseUrl: baseUrl,
-		client:  &http.Client{Timeout: 30 * time.Second},
+		client: &http.Client{
+			Timeout: 30 * time.Second,
+		},
 	}
 }
 
-type AnonymizeRequest struct {
-	Text    string `json:"text"`
-	Profile string `json:"profile"`
-}
-
-type AnonymizeResponse struct {
-	Action         string `json:"action"`
-	AnonymizedText string `json:"anonymized_text"`
-	Reason         string `json:"reason,omitempty"`
-}
-
-func (c *EngineClient) Anonymize(ctx context.Context, text, profile string) (*AnonymizeResponse, error) {
+func (c *EngineClient) Anonymize(ctx context.Context, text string) (string, error) {
 	req := AnonymizeRequest{
-		Text:    text,
-		Profile: profile,
+		Text: text,
 	}
 
 	jsonData, err := json.Marshal(req)
 	if err != nil {
-		return nil, fmt.Errorf("marshal request: %v", err)
+		return "", fmt.Errorf("marshal request: %v", err)
 	}
 
 	httpReq, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,
-		c.baseUrl+"/v1/anonimization/all",
-		bytes.NewBuffer(jsonData),
+		c.baseUrl+"/v1/anonimization/base",
+		bytes.NewReader(jsonData),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("create request: %v", err)
+		return "", fmt.Errorf("create request: %v", err)
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+
+	if requestId, ok := requestid.From(ctx); ok {
+		httpReq.Header.Set(requestid.Header, requestId)
+	}
 
 	resp, err := c.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("http request: %v", err)
+		return "", fmt.Errorf("http request: %v", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("engine returned status %d", resp.StatusCode)
+	if resp.StatusCode == http.StatusOK {
+		var anonymizedText string
+		if err := json.NewDecoder(resp.Body).Decode(&anonymizedText); err != nil {
+			return "", fmt.Errorf("decode 200 response: %v", err)
+		}
+		return anonymizedText, nil
 	}
 
-	var result AnonymizeResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode response: %v", err)
+	errBody, _ := readBodyLimited(resp.Body, 64<<10)
+
+	if resp.StatusCode == http.StatusUnprocessableEntity {
+		var validationError HTTPValidationError
+		if err := json.NewDecoder(resp.Body).Decode(&validationError); err != nil {
+			return "", &EngineHTTPError{
+				Status: resp.StatusCode,
+				Body:   string(errBody),
+			}
+		}
+		return "", &EngineValidationError{
+			Status: resp.StatusCode,
+			Detail: validationError,
+			Body:   string(errBody),
+		}
 	}
 
-	return &result, nil
+	return "", &EngineHTTPError{
+		Status: resp.StatusCode,
+		Body:   string(errBody),
+	}
 }
 
 func (c *EngineClient) Health(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseUrl+"/health", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseUrl+"/", nil)
 	if err != nil {
 		return err
 	}
@@ -90,4 +109,9 @@ func (c *EngineClient) Health(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func readBodyLimited(r io.Reader, max int64) ([]byte, error) {
+	limitedReader := io.LimitReader(r, max)
+	return io.ReadAll(limitedReader)
 }
