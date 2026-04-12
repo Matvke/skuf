@@ -13,6 +13,10 @@ import (
 	requestid "github.com/Matvke/skuf/internal/request_id"
 )
 
+type Engine interface {
+	Anonymize(context.Context, string) (string, error)
+	Health(context.Context) error
+}
 type EngineClient struct {
 	baseUrl string
 	client  *http.Client

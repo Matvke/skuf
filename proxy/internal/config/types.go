@@ -9,7 +9,6 @@ type RawConfig struct {
 
 type RawTarget struct {
 	Name     string      `yaml:"name"`
-	Profile  string      `yaml:"profile"`
 	Match    RawMatch    `yaml:"match"`
 	Upstream RawUpstream `yaml:"upstream"`
 	Extract  Extractor   `yaml:"extract"`
@@ -40,7 +39,6 @@ type Config struct {
 
 type Target struct {
 	Name        string
-	Profile     string
 	MatchHost   string
 	MatchPath   string
 	Methods     map[string]struct{}

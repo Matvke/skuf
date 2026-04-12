@@ -30,7 +30,6 @@ func Compile(rawCfg *RawConfig) (*Config, error) {
 			Methods:     methods,
 			UpstreamURL: upstreamUrl,
 			MatchHost:   strings.ToLower(rt.Match.Host),
-			Profile:     rt.Profile,
 			MatchPath:   rt.Match.Path,
 			Name:        rt.Name,
 			JsonPaths:   rt.Extract.JSONPaths,

@@ -17,14 +17,14 @@ import (
 
 type Server struct {
 	cfgStore  *config.Store
-	client    *client.EngineClient
-	forwarder *upstream.Forwarder
+	engine    client.Engine
+	forwarder upstream.IForwarder
 }
 
-func New(cfgStore *config.Store, engineClient *client.EngineClient, forwarder *upstream.Forwarder) *Server {
+func New(cfgStore *config.Store, engineClient client.Engine, forwarder upstream.IForwarder) *Server {
 	return &Server{
 		cfgStore:  cfgStore,
-		client:    engineClient,
+		engine:    engineClient,
 		forwarder: forwarder,
 	}
 }
@@ -126,7 +126,7 @@ func (s *Server) handleCatchAll(w http.ResponseWriter, r *http.Request) {
 	for _, extractedValue := range extracted {
 		anonymizedText, ok := cache[extractedValue.Value]
 		if !ok {
-			anonymizedText, err = s.client.Anonymize(ctx, extractedValue.Value)
+			anonymizedText, err = s.engine.Anonymize(ctx, extractedValue.Value)
 			if err != nil {
 				var validationError *client.EngineValidationError
 				if errors.As(err, &validationError) {

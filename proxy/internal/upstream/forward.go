@@ -13,6 +13,10 @@ type Forwarder struct {
 	client *http.Client
 }
 
+type IForwarder interface {
+	Forward(context.Context, http.ResponseWriter, *http.Request, string, []byte) error
+}
+
 var hopByHopHeaders = map[string]struct{}{
 	"Connection":        {},
 	"Proxy-Connection":  {},
