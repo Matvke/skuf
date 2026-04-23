@@ -15,17 +15,24 @@ import (
 	"github.com/Matvke/skuf/internal/upstream"
 )
 
+const (
+	rate  = 10
+	burst = 30
+)
+
 type Server struct {
-	cfgStore  *config.Store
-	engine    client.Engine
-	forwarder upstream.IForwarder
+	cfgStore    *config.Store
+	engine      client.Engine
+	forwarder   upstream.IForwarder
+	rateLimiter *middleware.RateLimiter
 }
 
 func New(cfgStore *config.Store, engineClient client.Engine, forwarder upstream.IForwarder) *Server {
 	return &Server{
-		cfgStore:  cfgStore,
-		engine:    engineClient,
-		forwarder: forwarder,
+		cfgStore:    cfgStore,
+		engine:      engineClient,
+		forwarder:   forwarder,
+		rateLimiter: middleware.NewRateLimiter(rate, burst),
 	}
 }
 
@@ -38,6 +45,7 @@ func (s *Server) Handler() http.Handler {
 
 	var h http.Handler = mux
 	h = middleware.RequestID(h)
+	h = s.rateLimiter.Middleware(h)
 
 	return h
 }
