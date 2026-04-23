@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sync"
 
 	"github.com/Matvke/skuf/internal/body"
 	"github.com/Matvke/skuf/internal/client"
@@ -100,25 +101,42 @@ func (s *Server) handleCatchAll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	extracted := make([]extract.Value, 0)
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(target.JsonPaths))
 
-	for _, path := range target.JsonPaths {
-		combinedPath, err := extract.ParsePath(path)
+	for i, path := range target.JsonPaths {
+
+		wg.Add(1)
+		go func(idx int, path string) {
+			defer wg.Done()
+
+			combinedPath, err := extract.ParsePath(path)
+			if err != nil {
+				errChan <- err
+				return
+			}
+
+			values, err := extract.Extract(payload, *combinedPath)
+			if err != nil {
+				errChan <- err
+				return
+			}
+
+			extracted = append(extracted, values...)
+
+		}(i, path)
+	}
+
+	wg.Wait()
+	close(errChan)
+
+	for err := range errChan {
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{
 				"error": err.Error(),
 			})
 			return
 		}
-
-		values, err := extract.Extract(payload, *combinedPath)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{
-				"error": err.Error(),
-			})
-			return
-		}
-
-		extracted = append(extracted, values...)
 	}
 
 	if len(extracted) == 0 {
@@ -127,6 +145,7 @@ func (s *Server) handleCatchAll(w http.ResponseWriter, r *http.Request) {
 				"error": err.Error(),
 			})
 		}
+		return
 	}
 
 	cache := make(map[string]string, len(extracted))
