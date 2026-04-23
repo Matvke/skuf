@@ -45,7 +45,7 @@ func main() {
 	}()
 
 	engineClient := client.NewEngineClient(cfg.EngineUrl)
-	forwarder := upstream.NewForwarder()
+	forwarder := upstream.NewWorkerPool()
 
 	srv := httpserver.New(store, engineClient, forwarder)
 
@@ -66,6 +66,10 @@ func main() {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
+	if err := forwarder.ShutDown(shutdownCtx); err != nil {
+		log.Printf("forwarder shutdown error: %v", err)
+	}
 
 	if err := httpServ.Shutdown(shutdownCtx); err != nil {
 		log.Printf("http shutdown error: %v", err)
