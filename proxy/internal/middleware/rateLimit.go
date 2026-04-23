@@ -13,6 +13,7 @@ type RateLimiter struct {
 	ttl     time.Duration
 	rate    float64
 	burst   int
+	mu      sync.RWMutex
 }
 
 type tokenBucket struct {
@@ -35,13 +36,20 @@ func NewRateLimiter(rate float64, burst int) *RateLimiter {
 }
 
 func (rl *RateLimiter) Allow(key string) bool {
+	rl.mu.RLock()
 	bucket, ok := rl.buckets[key]
+	rl.mu.RUnlock()
 	if !ok {
-		bucket := &tokenBucket{
-			tokens:     float64(rl.burst),
-			lastUpdate: time.Now(),
+		rl.mu.Lock()
+		bucket, ok = rl.buckets[key]
+		if !ok {
+			bucket = &tokenBucket{
+				tokens:     float64(rl.burst),
+				lastUpdate: time.Now(),
+			}
+			rl.buckets[key] = bucket
 		}
-		rl.buckets[key] = bucket
+		rl.mu.Unlock()
 	}
 
 	bucket.mu.Lock()
@@ -79,21 +87,19 @@ func (rl *RateLimiter) cleanUpLoop() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		rl.cleanUp()
-	}
-}
+		now := time.Now()
 
-func (rl *RateLimiter) cleanUp() {
-	now := time.Now()
+		rl.mu.Lock()
+		for key, bucket := range rl.buckets {
+			bucket.mu.Lock()
+			expired := now.Sub(bucket.lastUpdate) >= rl.ttl
+			bucket.mu.Unlock()
 
-	for key, bucket := range rl.buckets {
-		bucket.mu.Lock()
-		expired := now.Sub(bucket.lastUpdate) >= rl.ttl
-		bucket.mu.Unlock()
-
-		if expired {
-			delete(rl.buckets, key)
+			if expired {
+				delete(rl.buckets, key)
+			}
 		}
+		rl.mu.Unlock()
 	}
 }
 

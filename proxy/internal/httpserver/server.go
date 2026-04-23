@@ -23,12 +23,12 @@ const (
 
 type Server struct {
 	cfgStore    *config.Store
-	engine      client.Engine
+	engine      client.IEngine
 	forwarder   upstream.IForwarder
 	rateLimiter *middleware.RateLimiter
 }
 
-func New(cfgStore *config.Store, engineClient client.Engine, forwarder upstream.IForwarder) *Server {
+func New(cfgStore *config.Store, engineClient client.IEngine, forwarder upstream.IForwarder) *Server {
 	return &Server{
 		cfgStore:    cfgStore,
 		engine:      engineClient,
@@ -103,11 +103,11 @@ func (s *Server) handleCatchAll(w http.ResponseWriter, r *http.Request) {
 	extracted := make([]extract.Value, 0)
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(target.JsonPaths))
+	valuesChan := make(chan []extract.Value, len(target.JsonPaths))
 
-	for i, path := range target.JsonPaths {
-
+	for _, path := range target.JsonPaths {
 		wg.Add(1)
-		go func(idx int, path string) {
+		go func(path string) {
 			defer wg.Done()
 
 			combinedPath, err := extract.ParsePath(path)
@@ -122,13 +122,13 @@ func (s *Server) handleCatchAll(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			extracted = append(extracted, values...)
-
-		}(i, path)
+			valuesChan <- values
+		}(path)
 	}
 
 	wg.Wait()
 	close(errChan)
+	close(valuesChan)
 
 	for err := range errChan {
 		if err != nil {
@@ -137,6 +137,10 @@ func (s *Server) handleCatchAll(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+	}
+
+	for values := range valuesChan {
+		extracted = append(extracted, values...)
 	}
 
 	if len(extracted) == 0 {
@@ -148,28 +152,22 @@ func (s *Server) handleCatchAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cache := make(map[string]string, len(extracted))
-
 	for _, extractedValue := range extracted {
-		anonymizedText, ok := cache[extractedValue.Value]
-		if !ok {
-			anonymizedText, err = s.engine.Anonymize(ctx, extractedValue.Value)
-			if err != nil {
-				var validationError *client.EngineValidationError
-				if errors.As(err, &validationError) {
-					writeJSON(w, http.StatusBadGateway, map[string]any{
-						"error": "engine validation error",
-					})
-					return
-				}
-
-				w.WriteHeader(http.StatusBadGateway)
-				_ = json.NewEncoder(w).Encode(map[string]any{
-					"error": err.Error(),
+		anonymizedText, err := s.engine.Anonymize(ctx, extractedValue.Value)
+		if err != nil {
+			var validationError *client.EngineValidationError
+			if errors.As(err, &validationError) {
+				writeJSON(w, http.StatusBadGateway, map[string]any{
+					"error": "engine validation error",
 				})
 				return
 			}
-			cache[extractedValue.Value] = anonymizedText
+
+			w.WriteHeader(http.StatusBadGateway)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": err.Error(),
+			})
+			return
 		}
 
 		err = extract.SetString(payload, extractedValue.Path, anonymizedText)
