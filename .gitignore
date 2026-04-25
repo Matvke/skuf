@@ -27,3 +27,4 @@ env/
 *.pem.
 .python-version
 
+.codex

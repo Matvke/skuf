@@ -49,9 +49,15 @@ class ExtractionPipeline:
 
         return entities
 
-    def anonymize(self, text: str, placeholder: str = "[СКРЫТО]") -> str:
+    def anonymize(
+        self,
+        text: str,
+        placeholder: str = "[СКРЫТО]",
+        *,
+        remove_overlaps: bool = True,
+    ) -> str:
         """Заменить все найденные сущности на placeholder."""
-        entities = self.run(text)
+        entities = self.run(text, remove_overlaps=remove_overlaps)
         for entity in sorted(entities, key=lambda e: e.span.start, reverse=True):
             s, e = entity.span.start, entity.span.stop
             text = text[:s] + placeholder + text[e:]
