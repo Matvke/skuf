@@ -18,6 +18,10 @@ def create_app(*, profiles_db_path: str | None = None) -> FastAPI:
     async def _startup() -> None:
         await app.state.profile_store.ensure_seed_profile()
 
+    @app.on_event("shutdown")
+    async def _shutdown() -> None:
+        await app.state.profile_store.close()
+
     @app.get("/")
     async def home():
         return {"healthy": "true"}

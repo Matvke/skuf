@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
 import json
 import os
 import uuid
@@ -10,9 +9,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import aiosqlite
 import yaml
 from pydantic import ValidationError
+from sqlalchemy import Boolean, DateTime, Index, String, Text, desc, select, update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from extractors import registry
 from scheams.profile_schemas import ProfileDefinition
@@ -110,6 +117,48 @@ def parse_profile_yaml(
     return name, definition
 
 
+class Base(DeclarativeBase):
+    pass
+
+
+class ProfileRow(Base):
+    __tablename__ = "profiles"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    yaml: Mapped[str] = mapped_column(Text, nullable=False)
+    definition_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+Index("idx_profiles_updated_at", ProfileRow.updated_at.desc())
+Index("idx_profiles_active", ProfileRow.is_active)
+Index("idx_profiles_deleted", ProfileRow.is_deleted)
+Index(
+    "idx_only_one_active_profile",
+    ProfileRow.is_active,
+    unique=True,
+    sqlite_where=(ProfileRow.is_active.is_(True) & ProfileRow.is_deleted.is_(False)),
+)
+
+
+def _row_to_record(row: ProfileRow) -> ProfileRecord:
+    definition = ProfileDefinition.model_validate(json.loads(row.definition_json))
+    return ProfileRecord(
+        id=row.id,
+        name=row.name,
+        definition=definition,
+        yaml=row.yaml,
+        is_active=bool(row.is_active),
+        is_deleted=bool(row.is_deleted),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
 class ProfileStore:
     def __init__(self, db_path: str | Path | None = None) -> None:
         storage_dir = Path(os.getenv("ENGINE_STORAGE_DIR", "data"))
@@ -117,10 +166,16 @@ class ProfileStore:
         self._db_path = Path(db_path) if db_path is not None else default_db
         self._init_lock = asyncio.Lock()
         self._initialized = False
+        self._engine: AsyncEngine | None = None
+        self._sessionmaker: async_sessionmaker[AsyncSession] | None = None
 
     @property
     def db_path(self) -> Path:
         return self._db_path
+
+    @property
+    def _db_url(self) -> str:
+        return f"sqlite+aiosqlite:///{self._db_path.as_posix()}"
 
     async def init(self) -> None:
         async with self._init_lock:
@@ -129,39 +184,19 @@ class ProfileStore:
 
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
 
-            async with self._db() as db:
-                await db.execute("PRAGMA journal_mode=WAL;")
-                await db.execute("PRAGMA foreign_keys=ON;")
-                await db.executescript(
-                    """
-                    CREATE TABLE IF NOT EXISTS profiles (
-                        id TEXT PRIMARY KEY,
-                        name TEXT NOT NULL,
-                        yaml TEXT NOT NULL,
-                        definition_json TEXT NOT NULL,
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL,
-                        is_active INTEGER NOT NULL DEFAULT 0,
-                        is_deleted INTEGER NOT NULL DEFAULT 0
-                    );
+            self._engine = create_async_engine(self._db_url, future=True)
+            self._sessionmaker = async_sessionmaker(self._engine, expire_on_commit=False)
 
-                    CREATE INDEX IF NOT EXISTS idx_profiles_updated_at
-                    ON profiles(updated_at DESC);
-
-                    CREATE INDEX IF NOT EXISTS idx_profiles_active
-                    ON profiles(is_active);
-
-                    CREATE INDEX IF NOT EXISTS idx_profiles_deleted
-                    ON profiles(is_deleted);
-
-                    CREATE UNIQUE INDEX IF NOT EXISTS idx_only_one_active_profile
-                    ON profiles(is_active)
-                    WHERE is_active = 1 AND is_deleted = 0;
-                    """
-                )
-                await db.commit()
+            async with self._engine.begin() as conn:
+                await conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
+                await conn.run_sync(Base.metadata.create_all)
 
             self._initialized = True
+
+    async def close(self) -> None:
+        if self._engine is None:
+            return
+        await self._engine.dispose()
 
     async def ensure_seed_profile(self) -> None:
         await self.init()
@@ -184,55 +219,39 @@ class ProfileStore:
         )
         await self.create_from_yaml(seed_yaml, activate=True, name_hint="default")
 
-    @asynccontextmanager
-    async def _db(self):
-        async with aiosqlite.connect(self._db_path.as_posix()) as db:
-            db.row_factory = aiosqlite.Row
-            yield db
+    def _require_sessionmaker(self) -> async_sessionmaker[AsyncSession]:
+        if self._sessionmaker is None:
+            raise RuntimeError("ProfileStore is not initialized")
+        return self._sessionmaker
 
-    @staticmethod
-    def _row_to_record(row: aiosqlite.Row) -> ProfileRecord:
-        definition = ProfileDefinition.model_validate(json.loads(row["definition_json"]))
-        return ProfileRecord(
-            id=row["id"],
-            name=row["name"],
-            definition=definition,
-            yaml=row["yaml"],
-            is_active=bool(row["is_active"]),
-            is_deleted=bool(row["is_deleted"]),
-            created_at=datetime.fromisoformat(row["created_at"]),
-            updated_at=datetime.fromisoformat(row["updated_at"]),
-        )
+    def _new_session(self) -> AsyncSession:
+        return self._require_sessionmaker()()
 
     async def list_profiles(self, *, include_deleted: bool = False) -> list[ProfileRecord]:
         await self.init()
-        where = "" if include_deleted else "WHERE is_deleted = 0"
-        async with self._db() as db:
-            cur = await db.execute(
-                f"""
-                SELECT * FROM profiles
-                {where}
-                ORDER BY updated_at DESC
-                """
-            )
-            rows = await cur.fetchall()
-        return [self._row_to_record(r) for r in rows]
+        async with self._new_session() as session:
+            stmt = select(ProfileRow).order_by(desc(ProfileRow.updated_at))
+            if not include_deleted:
+                stmt = stmt.where(ProfileRow.is_deleted.is_(False))
+            rows = (await session.scalars(stmt)).all()
+        return [_row_to_record(r) for r in rows]
 
     async def get(self, profile_id: str) -> ProfileRecord | None:
         await self.init()
-        async with self._db() as db:
-            cur = await db.execute("SELECT * FROM profiles WHERE id = ?", (profile_id,))
-            row = await cur.fetchone()
-        return self._row_to_record(row) if row is not None else None
+        async with self._new_session() as session:
+            row = await session.get(ProfileRow, profile_id)
+        return _row_to_record(row) if row is not None else None
 
     async def get_active(self) -> ProfileRecord | None:
         await self.init()
-        async with self._db() as db:
-            cur = await db.execute(
-                "SELECT * FROM profiles WHERE is_active = 1 AND is_deleted = 0 LIMIT 1"
+        async with self._new_session() as session:
+            stmt = (
+                select(ProfileRow)
+                .where(ProfileRow.is_active.is_(True), ProfileRow.is_deleted.is_(False))
+                .limit(1)
             )
-            row = await cur.fetchone()
-        return self._row_to_record(row) if row is not None else None
+            row = await session.scalar(stmt)
+        return _row_to_record(row) if row is not None else None
 
     async def create_from_yaml(
         self,
@@ -251,31 +270,35 @@ class ProfileStore:
             activate = True
 
         profile_id = uuid.uuid4().hex
-        now = _utc_now().isoformat()
+        now = _utc_now()
         definition_json = json.dumps(definition.model_dump(), ensure_ascii=False)
 
-        async with self._db() as db:
-            await db.execute("BEGIN IMMEDIATE")
-            if activate:
-                await db.execute(
-                    "UPDATE profiles SET is_active = 0 WHERE is_active = 1"
-                )
-            await db.execute(
-                """
-                INSERT INTO profiles (
-                    id, name, yaml, definition_json,
-                    created_at, updated_at, is_active, is_deleted
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, 0)
-                """,
-                (profile_id, name, yaml_text, definition_json, now, now, int(activate)),
-            )
-            await db.commit()
+        async with self._new_session() as session:
+            async with session.begin():
+                if activate:
+                    await session.execute(
+                        update(ProfileRow)
+                        .where(ProfileRow.is_active.is_(True))
+                        .values(is_active=False)
+                    )
 
-        record = await self.get(profile_id)
-        if record is None:
-            raise RuntimeError("Failed to create profile")
-        return record
+                session.add(
+                    ProfileRow(
+                        id=profile_id,
+                        name=name,
+                        yaml=yaml_text,
+                        definition_json=definition_json,
+                        created_at=now,
+                        updated_at=now,
+                        is_active=activate,
+                        is_deleted=False,
+                    )
+                )
+
+            row = await session.get(ProfileRow, profile_id)
+            if row is None:
+                raise RuntimeError("Failed to create profile")
+            return _row_to_record(row)
 
     async def update_from_yaml(
         self,
@@ -297,27 +320,37 @@ class ProfileStore:
         if name_override:
             name = name_override
 
-        now = _utc_now().isoformat()
+        now = _utc_now()
         definition_json = json.dumps(definition.model_dump(), ensure_ascii=False)
 
-        async with self._db() as db:
-            await db.execute("BEGIN IMMEDIATE")
-            if activate:
-                await db.execute("UPDATE profiles SET is_active = 0 WHERE is_active = 1")
-            await db.execute(
-                """
-                UPDATE profiles
-                SET name = ?, yaml = ?, definition_json = ?, updated_at = ?, is_active = ?
-                WHERE id = ? AND is_deleted = 0
-                """,
-                (name, yaml_text, definition_json, now, int(activate or current.is_active), profile_id),
-            )
-            await db.commit()
+        try:
+            async with self._new_session() as session:
+                async with session.begin():
+                    if activate:
+                        await session.execute(
+                            update(ProfileRow)
+                            .where(ProfileRow.is_active.is_(True))
+                            .values(is_active=False)
+                        )
 
-        updated = await self.get(profile_id)
-        if updated is None:
-            raise RuntimeError("Failed to update profile")
-        return updated
+                    await session.execute(
+                        update(ProfileRow)
+                        .where(ProfileRow.id == profile_id, ProfileRow.is_deleted.is_(False))
+                        .values(
+                            name=name,
+                            yaml=yaml_text,
+                            definition_json=definition_json,
+                            updated_at=now,
+                            is_active=(activate or current.is_active),
+                        )
+                    )
+
+                row = await session.get(ProfileRow, profile_id)
+                if row is None:
+                    raise RuntimeError("Failed to update profile")
+                return _row_to_record(row)
+        except IntegrityError as exc:
+            raise ValueError("Activation conflict") from exc
 
     async def activate(self, profile_id: str) -> ProfileRecord:
         await self.init()
@@ -327,19 +360,29 @@ class ProfileStore:
         if record.is_deleted:
             raise ValueError("Profile is deleted")
 
-        async with self._db() as db:
-            await db.execute("BEGIN IMMEDIATE")
-            await db.execute("UPDATE profiles SET is_active = 0 WHERE is_active = 1")
-            await db.execute(
-                "UPDATE profiles SET is_active = 1, updated_at = ? WHERE id = ?",
-                (_utc_now().isoformat(), profile_id),
-            )
-            await db.commit()
+        now = _utc_now()
+        try:
+            async with self._new_session() as session:
+                async with session.begin():
+                    await session.execute(
+                        update(ProfileRow)
+                        .where(ProfileRow.is_active.is_(True))
+                        .values(is_active=False)
+                    )
+                    result = await session.execute(
+                        update(ProfileRow)
+                        .where(ProfileRow.id == profile_id, ProfileRow.is_deleted.is_(False))
+                        .values(is_active=True, updated_at=now)
+                    )
+                    if result.rowcount == 0:
+                        raise KeyError(profile_id)
 
-        active = await self.get(profile_id)
-        if active is None:
-            raise RuntimeError("Failed to activate profile")
-        return active
+                row = await session.get(ProfileRow, profile_id)
+                if row is None:
+                    raise RuntimeError("Failed to activate profile")
+                return _row_to_record(row)
+        except IntegrityError as exc:
+            raise ValueError("Activation conflict") from exc
 
     async def delete(self, profile_id: str) -> None:
         await self.init()
@@ -349,13 +392,14 @@ class ProfileStore:
         if record.is_deleted:
             return
 
-        async with self._db() as db:
-            await db.execute("BEGIN IMMEDIATE")
-            await db.execute(
-                "UPDATE profiles SET is_deleted = 1, is_active = 0, updated_at = ? WHERE id = ?",
-                (_utc_now().isoformat(), profile_id),
-            )
-            await db.commit()
+        now = _utc_now()
+        async with self._new_session() as session:
+            async with session.begin():
+                await session.execute(
+                    update(ProfileRow)
+                    .where(ProfileRow.id == profile_id)
+                    .values(is_deleted=True, is_active=False, updated_at=now)
+                )
 
         if record.is_active:
             candidates = await self.list_profiles(include_deleted=False)
