@@ -1,0 +1,9 @@
+.git
+.gitignore
+.gocache
+*.exe
+*.out
+coverage.*
+.env
+.idea
+.vscode
