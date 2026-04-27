@@ -46,7 +46,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/health", s.handleHealth)
 	mux.HandleFunc("/api/v1/debug/config", s.handleConfig)
 	mux.HandleFunc("/api/v1/config", s.UpdateConfig)
-	mux.HandleFunc("/api/v1/", s.handleCatchAll)
+	mux.HandleFunc("/", s.handleCatchAll)
 
 	var h http.Handler = mux
 	h = middleware.RequestID(h)
