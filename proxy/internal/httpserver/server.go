@@ -3,6 +3,7 @@ package httpserver
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -61,6 +62,30 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(cfg)
+}
+
+func (s *Server) UpdateConfig(w http.ResponseWriter, r *http.Request) {
+	var rawCfg config.RawConfig
+
+	if err := json.NewDecoder(r.Body).Decode(&rawCfg); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": fmt.Sprintf("invalid config: %w", err.Error()),
+		})
+		return
+	}
+
+	cfg, err := config.Compile(&rawCfg)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": fmt.Sprintf("invalid config: %w", err.Error()),
+		})
+		return
+	}
+
+	s.cfgStore.Set(cfg)
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("config updated"))
 }
 
 func (s *Server) handleCatchAll(w http.ResponseWriter, r *http.Request) {
