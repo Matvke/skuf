@@ -1,11 +1,8 @@
 package upstream
 
 import (
-	"bytes"
 	"context"
-	"io"
 	"net/http"
-	"net/url"
 	"sync"
 	"time"
 )
@@ -81,52 +78,6 @@ func (wp *WorkerPool) worker(id int) {
 		result.err = wp.doForward(task.ctx, task.w, task.r, task.upstreamURL, task.body)
 		task.resultChan <- result
 	}
-}
-
-func (wp *WorkerPool) doForward(ctx context.Context, w http.ResponseWriter, r *http.Request, upstreamURL string, body []byte) error {
-	url, err := url.Parse(upstreamURL)
-	if err != nil {
-		return err
-	}
-
-	url.RawQuery = r.URL.RawQuery
-
-	request, err := http.NewRequestWithContext(ctx, r.Method, url.String(), bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-
-	for key, vv := range r.Header {
-		if _, banned := hopByHopHeaders[key]; banned {
-			continue
-		}
-
-		for _, value := range vv {
-			request.Header.Add(key, value)
-		}
-	}
-
-	request.Host = url.Host
-
-	response, err := wp.client.Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-
-	for key, vv := range response.Header {
-		if _, banned := hopByHopHeaders[key]; banned {
-			continue
-		}
-
-		for _, value := range vv {
-			w.Header().Add(key, value)
-		}
-	}
-
-	w.WriteHeader(response.StatusCode)
-	_, err = io.Copy(w, response.Body)
-	return err
 }
 
 func (wp *WorkerPool) Forward(ctx context.Context, w http.ResponseWriter, r *http.Request, upstreamURL string, body []byte) error {

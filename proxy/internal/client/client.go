@@ -40,10 +40,18 @@ type inflightCall struct {
 
 func NewEngineClient(baseUrl string) *EngineClient {
 	baseUrl = strings.TrimRight(baseUrl, "/")
+
+	transport := &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 50,
+		IdleConnTimeout:     90 * time.Second,
+	}
+
 	engineClient := &EngineClient{
 		baseUrl: baseUrl,
 		client: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout:   30 * time.Second,
+			Transport: transport,
 		},
 		ttl:      time.Minute * 5,
 		inflight: make(map[string]*inflightCall),
@@ -131,6 +139,8 @@ func (ec *EngineClient) Anonymize(ctx context.Context, text string) (string, err
 	}
 
 	errBody, err := readBodyLimited(resp.Body, 64<<10)
+	io.Copy(io.Discard, resp.Body)
+
 	if err != nil {
 		call.err = fmt.Errorf("reading body, error: %v", err)
 		return "", call.err
