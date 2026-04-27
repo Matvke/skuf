@@ -24,14 +24,16 @@ const (
 
 type Server struct {
 	cfgStore    *config.Store
+	configPath  string
 	engine      client.IEngine
 	forwarder   upstream.IForwarder
 	rateLimiter *middleware.RateLimiter
 }
 
-func New(cfgStore *config.Store, engineClient client.IEngine, forwarder upstream.IForwarder) *Server {
+func New(cfgStore *config.Store, configPath string, engineClient client.IEngine, forwarder upstream.IForwarder) *Server {
 	return &Server{
 		cfgStore:    cfgStore,
+		configPath:  configPath,
 		engine:      engineClient,
 		forwarder:   forwarder,
 		rateLimiter: middleware.NewRateLimiter(rate, burst),
@@ -41,9 +43,10 @@ func New(cfgStore *config.Store, engineClient client.IEngine, forwarder upstream
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/health", s.handleHealth)
-	mux.HandleFunc("/debug/config", s.handleConfig)
-	mux.HandleFunc("/", s.handleCatchAll)
+	mux.HandleFunc("/api/v1/health", s.handleHealth)
+	mux.HandleFunc("/api/v1/debug/config", s.handleConfig)
+	mux.HandleFunc("/api/v1/config", s.UpdateConfig)
+	mux.HandleFunc("/api/v1/", s.handleCatchAll)
 
 	var h http.Handler = mux
 	h = middleware.RequestID(h)
@@ -69,15 +72,30 @@ func (s *Server) UpdateConfig(w http.ResponseWriter, r *http.Request) {
 
 	if err := json.NewDecoder(r.Body).Decode(&rawCfg); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"error": fmt.Sprintf("invalid config: %w", err.Error()),
+			"error": fmt.Sprintf("invalid config: %v", err),
+		})
+		return
+	}
+
+	err := config.Validate(&rawCfg)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": fmt.Sprintf("invalid config: %v", err),
+		})
+		return
+	}
+
+	if err := config.SaveToFile(s.configPath, &rawCfg); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": fmt.Sprintf("cant save config: %v", err),
 		})
 		return
 	}
 
 	cfg, err := config.Compile(&rawCfg)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"error": fmt.Sprintf("invalid config: %w", err.Error()),
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": fmt.Sprintf("invalid config: %v", err),
 		})
 		return
 	}

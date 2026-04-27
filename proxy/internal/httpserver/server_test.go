@@ -56,9 +56,9 @@ func TestProxy_AnonymizeAndForward_ModifiesJSONBody(t *testing.T) {
 			{
 				Name:        "openai-chat",
 				MatchHost:   "localhost:8080",
-				MatchPath:   "/static",
+				MatchPath:   "/api/v1/static",
 				Methods:     map[string]struct{}{"POST": {}},
-				UpstreamURL: "http://localhost:8080/static",
+				UpstreamURL: "http://localhost:8080/api/v1/static",
 				JsonPaths:   []string{"data.chat.messages[*].parts[*].text"},
 			},
 		},
@@ -69,7 +69,7 @@ func TestProxy_AnonymizeAndForward_ModifiesJSONBody(t *testing.T) {
 	testEngine := &MockEngine{}
 	testForwarder := &MockForwarder{}
 
-	testServer := New(store, testEngine, testForwarder)
+	testServer := New(store, "configs/config.yaml", testEngine, testForwarder)
 
 	reqBody := []byte(`{
 	  "data": {
@@ -83,7 +83,7 @@ func TestProxy_AnonymizeAndForward_ModifiesJSONBody(t *testing.T) {
 	}`)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "http://localhost/static", bytes.NewReader(reqBody))
+	req := httptest.NewRequest(http.MethodPost, "http://localhost/api/v1/static", bytes.NewReader(reqBody))
 	req.Host = "localhost:8080"
 	req.Header.Set("Content-Type", "application/json")
 

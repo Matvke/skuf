@@ -15,9 +15,11 @@ import (
 	"github.com/Matvke/skuf/internal/upstream"
 )
 
-func main() {
-	configPath := "configs/config.yaml"
+const (
+	configPath = "configs/config.yaml"
+)
 
+func main() {
 	rawCfg, err := config.LoadFromFile(configPath)
 	if err != nil {
 		log.Fatalf("failed loading config: %v", err)
@@ -37,17 +39,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	cfgWatcher := config.NewWatcher(configPath, store)
-	go func() {
-		if err := cfgWatcher.Run(ctx); err != nil {
-			log.Printf("config watcher stopped with error: %v", err)
-		}
-	}()
-
 	engineClient := client.NewEngineClient(cfg.EngineUrl)
 	forwarder := upstream.NewWorkerPool()
 
-	srv := httpserver.New(store, engineClient, forwarder)
+	srv := httpserver.New(store, configPath, engineClient, forwarder)
 
 	httpServ := &http.Server{
 		Addr:              ":8080",

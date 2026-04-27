@@ -20,3 +20,20 @@ func LoadFromFile(path string) (*RawConfig, error) {
 
 	return &cfg, nil
 }
+
+func SaveToFile(path string, cfg *RawConfig) error {
+	if cfg == nil {
+		return fmt.Errorf("config is nil")
+	}
+
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("cant marshal config to yaml, err: %v", err)
+	}
+
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("cant write config file %s, err: %v", path, err)
+	}
+
+	return nil
+}
