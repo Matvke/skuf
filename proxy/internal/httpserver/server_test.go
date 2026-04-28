@@ -31,6 +31,10 @@ func (m *MockEngine) Health(ctx context.Context) error {
 	return nil
 }
 
+func (m *MockEngine) SetBaseUrl(url string) {
+	return
+}
+
 type MockForwarder struct {
 	mu          sync.Mutex
 	Calls       int

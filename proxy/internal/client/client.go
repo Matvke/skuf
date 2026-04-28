@@ -17,7 +17,9 @@ import (
 type IEngine interface {
 	Anonymize(context.Context, string) (string, error)
 	Health(context.Context) error
+	SetBaseUrl(string)
 }
+
 type EngineClient struct {
 	baseUrl  string
 	client   *http.Client
@@ -209,4 +211,14 @@ func (ec *EngineClient) cleanUpLoop() {
 			return true
 		})
 	}
+}
+
+func (ec *EngineClient) SetBaseUrl(baseUrl string) {
+	ec.mu.Lock()
+	defer ec.mu.Unlock()
+	ec.baseUrl = strings.TrimRight(baseUrl, "/")
+	ec.cache.Range(func(key, value any) bool {
+		ec.cache.Delete(key)
+		return true
+	})
 }

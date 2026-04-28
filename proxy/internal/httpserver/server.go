@@ -102,6 +102,11 @@ func (s *Server) UpdateConfig(w http.ResponseWriter, r *http.Request) {
 
 	s.cfgStore.Set(cfg)
 
+	// Обновляем engine_url если изменился
+	if cfg.EngineUrl != "" {
+		s.engine.SetBaseUrl(cfg.EngineUrl)
+	}
+
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("config updated"))
 }
