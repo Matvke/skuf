@@ -1,0 +1,254 @@
+package httpserver
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"sync"
+
+	"github.com/Matvke/skuf/internal/body"
+	"github.com/Matvke/skuf/internal/client"
+	"github.com/Matvke/skuf/internal/config"
+	"github.com/Matvke/skuf/internal/extract"
+	"github.com/Matvke/skuf/internal/middleware"
+	"github.com/Matvke/skuf/internal/routing"
+	"github.com/Matvke/skuf/internal/upstream"
+)
+
+const (
+	rate  = 10
+	burst = 30
+)
+
+type Server struct {
+	cfgStore    *config.Store
+	configPath  string
+	engine      client.IEngine
+	forwarder   upstream.IForwarder
+	rateLimiter *middleware.RateLimiter
+}
+
+func New(cfgStore *config.Store, configPath string, engineClient client.IEngine, forwarder upstream.IForwarder) *Server {
+	return &Server{
+		cfgStore:    cfgStore,
+		configPath:  configPath,
+		engine:      engineClient,
+		forwarder:   forwarder,
+		rateLimiter: middleware.NewRateLimiter(rate, burst),
+	}
+}
+
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/api/v1/health", s.handleHealth)
+	mux.HandleFunc("/api/v1/debug/config", s.handleConfig)
+	mux.HandleFunc("/api/v1/config", s.UpdateConfig)
+	mux.HandleFunc("/", s.handleCatchAll)
+
+	var h http.Handler = mux
+	h = middleware.RequestID(h)
+	h = s.rateLimiter.Middleware(h)
+
+	return h
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("ok"))
+}
+
+func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	cfg := s.cfgStore.Get()
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(cfg)
+}
+
+func (s *Server) UpdateConfig(w http.ResponseWriter, r *http.Request) {
+	var rawCfg config.RawConfig
+
+	if err := json.NewDecoder(r.Body).Decode(&rawCfg); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": fmt.Sprintf("invalid config: %v", err),
+		})
+		return
+	}
+
+	err := config.Validate(&rawCfg)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": fmt.Sprintf("invalid config: %v", err),
+		})
+		return
+	}
+
+	if err := config.SaveToFile(s.configPath, &rawCfg); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": fmt.Sprintf("cant save config: %v", err),
+		})
+		return
+	}
+
+	cfg, err := config.Compile(&rawCfg)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": fmt.Sprintf("invalid config: %v", err),
+		})
+		return
+	}
+
+	s.cfgStore.Set(cfg)
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("config updated"))
+}
+
+func (s *Server) handleCatchAll(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	cfg := s.cfgStore.Get()
+
+	target := routing.Match(cfg, r)
+
+	if target == nil {
+		slog.LogAttrs(
+			r.Context(),
+			slog.LevelInfo,
+			"unmatched target",
+			slog.Bool("matched", false),
+		)
+
+		writeJSON(w, http.StatusNotFound, map[string]any{
+			"error": "no route matched",
+		})
+		return
+	}
+
+	data, err := body.Reader(r, 1<<20)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	payload, err := body.ParseJSON(data)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	extracted := make([]extract.Value, 0)
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(target.JsonPaths))
+	valuesChan := make(chan []extract.Value, len(target.JsonPaths))
+
+	for _, path := range target.JsonPaths {
+		wg.Add(1)
+		go func(path string) {
+			defer wg.Done()
+
+			combinedPath, err := extract.ParsePath(path)
+			if err != nil {
+				errChan <- err
+				return
+			}
+
+			values, err := extract.Extract(payload, *combinedPath)
+			if err != nil {
+				errChan <- err
+				return
+			}
+
+			valuesChan <- values
+		}(path)
+	}
+
+	wg.Wait()
+	close(errChan)
+	close(valuesChan)
+
+	for err := range errChan {
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error": err.Error(),
+			})
+			return
+		}
+	}
+
+	for values := range valuesChan {
+		extracted = append(extracted, values...)
+	}
+
+	if len(extracted) == 0 {
+		if err := s.forwarder.Forward(ctx, w, r, target.UpstreamURL, data); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{
+				"error": err.Error(),
+			})
+		}
+		return
+	}
+
+	for _, extractedValue := range extracted {
+		anonymizedText, err := s.engine.Anonymize(ctx, extractedValue.Value)
+		if err != nil {
+			var validationError *client.EngineValidationError
+			if errors.As(err, &validationError) {
+				writeJSON(w, http.StatusBadGateway, map[string]any{
+					"error": "engine validation error",
+				})
+				return
+			}
+
+			w.WriteHeader(http.StatusBadGateway)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": err.Error(),
+			})
+			return
+		}
+
+		err = extract.SetString(payload, extractedValue.Path, anonymizedText)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{
+				"error": err.Error(),
+			})
+			return
+		}
+	}
+
+	newBody, err := json.Marshal(payload)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	slog.LogAttrs(
+		r.Context(),
+		slog.LevelInfo,
+		"forward request",
+		slog.String("target", target.Name),
+		slog.Int("extracted_count", len(extracted)),
+		slog.String("upstream_url", target.UpstreamURL),
+	)
+
+	if err := s.forwarder.Forward(ctx, w, r, target.UpstreamURL, newBody); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"error": err.Error(),
+		})
+		return
+	}
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}

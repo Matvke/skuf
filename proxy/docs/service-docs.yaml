@@ -1,0 +1,132 @@
+service:
+  name: skuf-proxy
+  language: go
+  purpose: >
+    HTTP proxy для анонимизации текста перед форвардингом на upstream-сервис.
+
+overview:
+  summary:
+    - Принимает HTTP запросы
+    - Матчит по host, path и method из runtime конфигурации
+    - Извлекает значения по JSONPath из тела запроса
+    - Отправляет извлечённый текст на engine для анонимизации
+    - Заменяет оригинальные значения в payload
+    - Форвардит модифицированный запрос на upstream
+
+request_flow:
+  steps:
+    - "Приём запроса на HTTP сервер"
+    - "Генерация или использование X-Request-ID"
+    - "Rate limiting по IP клиента"
+    - "Match по конфигурируемым таргетам"
+    - "Парсинг JSON тела"
+    - "Извлечение значений по json_paths"
+    - "Анонимизация через engine"
+    - "Замена значений в payload"
+    - "Форвардинг через worker pool"
+
+http_api:
+  base_prefix: /
+  endpoints:
+    - method: GET
+      path: /health
+      description: Health check
+      response: "ok"
+    - method: GET
+      path: /debug/config
+      description: Текущая активная конфигурация
+    - method: POST
+      path: /config
+      description: Обновление runtime конфигурации
+    - method: ANY
+      path: /*
+      description: Основной proxy endpoint (catch-all)
+
+config_contract:
+  source_file: configs/config.yaml
+  update_endpoint: POST /api/v1/config
+  required_fields:
+    - engine_url
+    - targets
+  optional_fields:
+    - port (default: 8080)
+    - reload_debounce_ms (default: 500)
+  
+  target_structure:
+    name: string (required)
+    match:
+      host: string (optional)
+      path: string (required)
+      methods: string[] (required)
+    upstream:
+      scheme: http|https (required)
+      host: string (required)
+      path: string (optional)
+    extract:
+      json_paths: string[] (optional)
+
+validation_rules:
+  - port: 1-65535
+  - engine_url: валидный URL
+  - target.name: требуется
+  - target.match.path: требуется
+  - target.match.methods: минимум 1
+  - target.upstream.scheme: http или https
+  - target.upstream.host: требуется
+
+middleware:
+  request_id:
+    header: X-Request-ID
+    behavior:
+      - Использует существующий если есть
+      - Генерирует UUID если отсутствует
+      - Добавляет в заголовки ответа
+      - Передаёт в контекст для engine
+  rate_limit:
+    algorithm: token bucket
+    rate: 10 req/s
+    burst: 30
+    key: X-Forwarded-For > X-Real-IP > RemoteAddr
+    response:
+      status: 429
+      retry_after: "1"
+
+forwarding:
+  worker_pool:
+    workers: 50
+    queue_size: 1000
+    timeout: 30s
+  retry:
+    max_retries: 3
+    base_delay: 100ms
+    max_delay: 2s
+    jitter: 0.5
+
+anonymization_engine:
+  base_url: engine_url из конфига
+  endpoint: POST /v1/anonimiziation/base
+  timeout: 30s
+  cache_ttl: 5min
+
+known_limitations:
+  - engine_url не обновляет client динамически (требуется перезапуск)
+  - JSON body ожидается для anonymization flow
+  - Exact match для host и path (без wildcards)
+  - Overflow очереди worker pool возвращает ошибку
+
+run_local:
+  requirements:
+    - Go 1.25+
+    - Running anonymization engine
+  commands:
+    test: go test ./...
+    run: go run ./cmd/app
+  default_port: 8080
+
+docker:
+  build: docker build -t skuf-proxy .
+  run: docker run --rm -p 8080:8080 skuf-proxy
+  volumes:
+    - /app/configs для persistence config
+  notes:
+    - engine_url должен указывать на reachable сервис (не localhost в Docker)

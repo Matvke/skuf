@@ -1,0 +1,346 @@
+openapi: 3.0.3
+info:
+  title: Skuf Proxy API
+  version: 1.0.0
+  description: |
+    HTTP proxy с анонимизацией текста перед форвардингом на upstream.
+    
+    ## Основные возможности
+    - Динамическая маршрутизация через runtime конфигурацию
+    - Извлечение данных по JSONPath
+    - Анонимизация через внешний engine
+    - Hot-reload конфигурации
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+tags:
+  - name: system
+    description: Service health and diagnostics
+  - name: config
+    description: Runtime configuration management
+  - name: proxy
+    description: Proxy gateway endpoints
+
+paths:
+  /api/v1/health:
+    get:
+      tags:
+        - system
+      summary: Health check
+      description: Возвращает статус сервиса.
+      responses:
+        "200":
+          description: Service is alive
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: ok
+
+  /api/v1/debug/config:
+    get:
+      tags:
+        - config
+      summary: Get active config
+      description: Возвращает текущую активную конфигурацию из in-memory store.
+      responses:
+        "200":
+          description: Active config
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompiledConfig"
+              example:
+                port: 8080
+                engine_url: http://localhost:8090
+                reload_debounce_ms: 500
+                targets:
+                  - name: openai-chat
+                    match_host: localhost:8080
+                    match_path: /api/v1/chat
+                    methods:
+                      POST: {}
+                      GET: {}
+                    upstream_url: http://localhost:8080/api/v1/chat
+                    json_paths:
+                      - data.messages[*].text
+
+  /api/v1/config:
+    post:
+      tags:
+        - config
+      summary: Update runtime config
+      description: |
+        Загружает новую конфигурацию, валидирует, сохраняет в `configs/config.yaml`,
+        компилирует и обновляет in-memory store.
+        
+        ## Примечания
+        - Возвращает ошибку 400 при валидации
+        - Возвращает ошибку 500 при проблемах с записью файла
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RawConfig"
+            example:
+              port: 8080
+              engine_url: http://localhost:8090
+              reload_debounce_ms: 500
+              targets:
+                - name: openai-chat
+                  match:
+                    host: localhost:8080
+                    path: /api/v1/chat
+                    methods:
+                      - POST
+                  upstream:
+                    scheme: http
+                    host: localhost:8080
+                    path: /api/v1/chat
+                  extract:
+                    json_paths:
+                      - data.messages[*].text
+      responses:
+        "200":
+          description: Config updated successfully
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: config updated
+        "400":
+          description: Invalid config payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: invalid config targets[0].name is required
+        "500":
+          description: Failed to persist or apply config
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: cannot save config permission denied
+
+  "/":
+    post:
+      tags:
+        - proxy
+      summary: Proxy gateway
+      description: |
+        Основной endpoint прокси. Маршрутизация происходит динамически
+        на основе конфигурации (host, path, method).
+        
+        ## Процесс обработки
+        1. Match по host/path/method
+        2. Извлечение значений по JSONPath
+        3. Анонимизация через engine
+        4. Форвардинг на upstream
+        
+        ## Возможные статусы
+        - 200 — успешно
+        - 400 — неверный JSON или ошибка извлечения
+        - 404 — нет совпадающего маршрута
+        - 429 — rate limit exceeded
+        - 502 — ошибка upstream
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Success — proxied response from upstream
+        "400":
+          description: Invalid request body or extraction failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: No matching route found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Rate limit exceeded
+          headers:
+            Retry-After:
+              schema:
+                type: string
+                example: "1"
+        "502":
+          description: Upstream error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  schemas:
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          description: Описание ошибки
+
+    RawConfig:
+      type: object
+      required:
+        - engine_url
+        - targets
+      properties:
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+          description: Порт сервера (опционально, по умолчанию 8080)
+          example: 8080
+        engine_url:
+          type: string
+          format: uri
+          description: URL анонимизационного engine
+          example: http://localhost:8090
+        reload_debounce_ms:
+          type: integer
+          minimum: 0
+          description: debounce задержка для hot-reload (опционально)
+          example: 500
+        targets:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/RawTarget"
+
+    RawTarget:
+      type: object
+      required:
+        - name
+        - match
+        - upstream
+      properties:
+        name:
+          type: string
+          description: Уникальное имя таргета
+          example: openai-chat
+        match:
+          $ref: "#/components/schemas/RawMatch"
+        upstream:
+          $ref: "#/components/schemas/RawUpstream"
+        extract:
+          $ref: "#/components/schemas/Extractor"
+
+    RawMatch:
+      type: object
+      required:
+        - path
+        - methods
+      properties:
+        host:
+          type: string
+          description: Хост для матчинга (опционально)
+          example: localhost:8080
+        path:
+          type: string
+          description: Путь для матчинга (обязательный)
+          example: /api/v1/chat
+        methods:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            enum: [GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS]
+          description: HTTP методы (обязательные)
+          example: ["POST", "GET"]
+
+    RawUpstream:
+      type: object
+      required:
+        - scheme
+        - host
+      properties:
+        scheme:
+          type: string
+          enum: [http, https]
+          description: Схema upstream
+          example: http
+        host:
+          type: string
+          description: Хост upstream
+          example: localhost:8080
+        path:
+          type: string
+          description: Путь upstream (опционально, добавляется к host)
+          example: /api/v1/chat
+
+    Extractor:
+      type: object
+      properties:
+        json_paths:
+          type: array
+          items:
+            type: string
+          description: JSONPath выражения для извлечения текста
+          example:
+            - data.messages[*].text
+            - messages[*].content[*].text
+
+    CompiledConfig:
+      type: object
+      properties:
+        port:
+          type: integer
+          example: 8080
+        engine_url:
+          type: string
+          example: http://localhost:8090
+        reload_debounce_ms:
+          type: integer
+          example: 500
+        targets:
+          type: array
+          items:
+            $ref: "#/components/schemas/CompiledTarget"
+
+    CompiledTarget:
+      type: object
+      properties:
+        name:
+          type: string
+          example: openai-chat
+        match_host:
+          type: string
+          nullable: true
+          example: localhost:8080
+        match_path:
+          type: string
+          example: /api/v1/chat
+        methods:
+          type: object
+          description: Методы как ключи с пустыми объектами
+          additionalProperties:
+            type: object
+          example:
+            POST: {}
+            GET: {}
+        upstream_url:
+          type: string
+          example: http://localhost:8080/api/v1/chat
+        json_paths:
+          type: array
+          items:
+            type: string
+          example:
+            - data.messages[*].text
