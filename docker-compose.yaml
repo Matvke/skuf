@@ -1,0 +1,14 @@
+services:
+  proxy:
+    build: ./proxy
+    ports:
+      - "8080:8080"
+    environment:
+      - ENGINE_URL=http://engine:8000
+    depends_on:
+      - engine
+
+  engine:
+    build: ./engine
+    ports:
+      - "8000:8000"

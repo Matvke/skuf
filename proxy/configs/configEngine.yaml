@@ -1,0 +1,4 @@
+name: default
+extractors: [passport, inn, phone]
+placeholder: "[СКРЫТО]"
+remove_overlaps: true

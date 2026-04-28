@@ -1,5 +1,5 @@
 port: 8080
-engine_url: http://localhost:8090
+engine_url: http://engine:8000
 reload_debounce_ms: 500
 targets:
     - name: openai-chat
@@ -11,8 +11,8 @@ targets:
             - GET
       upstream:
         scheme: http
-        host: localhost:8080
-        path: /static
+        host: google.com:443
+        path: /
       extract:
         json_paths:
             - data.chat.messages[*].parts[*].text
