@@ -11,7 +11,7 @@ targets:
             - GET
       upstream:
         scheme: http
-        host: google.com:443
+        host: httpbin.org:443
         path: /
       extract:
         json_paths:
