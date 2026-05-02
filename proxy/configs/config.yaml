@@ -5,13 +5,13 @@ targets:
     - name: openai-chat
       match:
         host: localhost:8080
-        path: /static
+        path: /
         methods:
             - POST
             - GET
       upstream:
-        scheme: http
-        host: httpbin.org:443
+        scheme: https
+        host: httpbin.org
         path: /
       extract:
         json_paths:
