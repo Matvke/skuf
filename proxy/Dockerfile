@@ -7,6 +7,7 @@ RUN go mod download
 
 COPY cmd ./cmd
 COPY configs ./configs
+COPY demo ./demo
 COPY internal ./internal
 
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/proxy ./cmd/app
@@ -19,6 +20,7 @@ RUN addgroup -S app && adduser -S app -G app
 
 COPY --from=builder /out/proxy /app/proxy
 COPY --from=builder /src/configs /app/configs
+COPY --from=builder /src/demo /app/demo
 
 RUN chown -R app:app /app
 
