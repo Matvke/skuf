@@ -29,6 +29,10 @@ class ExtractorRegistry:
     def all_names(self) -> list[str]:
         return list(self._extractors)
 
+    def all_extractors(self) -> dict[str, Type[BaseExtractor]]:
+        """Словарь всех зарегистрированных экстракторов (name -> class)."""
+        return dict(self._extractors)
+
     def instantiate_all(self) -> list[BaseExtractor]:
         """Создать экземпляры всех зарегистрированных экстракторов."""
         return [cls() for cls in self._extractors.values()]

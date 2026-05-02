@@ -33,6 +33,7 @@ class ProfileYamlError(ValueError):
 class ProfileRecord:
     id: str
     name: str
+    description: str | None
     definition: ProfileDefinition
     yaml: str
     is_active: bool
@@ -44,6 +45,7 @@ class ProfileRecord:
         return {
             "id": self.id,
             "name": self.name,
+            "description": self.description,
             "definition": self.definition.model_dump(),
             "yaml": self.yaml,
             "is_active": self.is_active,
@@ -72,7 +74,7 @@ def parse_profile_yaml(
     yaml_text: str,
     *,
     name_hint: str | None = None,
-) -> tuple[str, ProfileDefinition]:
+) -> tuple[str, str | None, ProfileDefinition]:
     try:
         raw = yaml.safe_load(yaml_text)
     except Exception as exc:  # noqa: BLE001
@@ -84,6 +86,10 @@ def parse_profile_yaml(
     name = raw.get("name") or name_hint
     if not name or not isinstance(name, str):
         raise ProfileYamlError("Не удалось определить имя профиля (поле `name` или имя файла)")
+
+    description = raw.get("description")
+    if description is not None and not isinstance(description, str):
+        raise ProfileYamlError("Поле `description` должно быть строкой")
 
     extractors = raw.get("extractors") or raw.get("base_extractors")
     if extractors is None:
@@ -114,7 +120,7 @@ def parse_profile_yaml(
             f"Неизвестные экстракторы: {unknown}. Доступные: {sorted(available)}"
         )
 
-    return name, definition
+    return name, description, definition
 
 
 class Base(DeclarativeBase):
@@ -126,6 +132,7 @@ class ProfileRow(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
     yaml: Mapped[str] = mapped_column(Text, nullable=False)
     definition_json: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -137,6 +144,7 @@ class ProfileRow(Base):
 Index("idx_profiles_updated_at", ProfileRow.updated_at.desc())
 Index("idx_profiles_active", ProfileRow.is_active)
 Index("idx_profiles_deleted", ProfileRow.is_deleted)
+Index("idx_profiles_name", ProfileRow.name)
 Index(
     "idx_only_one_active_profile",
     ProfileRow.is_active,
@@ -150,6 +158,7 @@ def _row_to_record(row: ProfileRow) -> ProfileRecord:
     return ProfileRecord(
         id=row.id,
         name=row.name,
+        description=row.description,
         definition=definition,
         yaml=row.yaml,
         is_active=bool(row.is_active),
@@ -190,8 +199,20 @@ class ProfileStore:
             async with self._engine.begin() as conn:
                 await conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
                 await conn.run_sync(Base.metadata.create_all)
+                await self._migrate(conn)
 
             self._initialized = True
+
+    async def _migrate(self, conn) -> None:
+        """
+        Лёгкая миграция для SQLite без Alembic.
+
+        Сейчас поддерживаем только добавление новых колонок.
+        """
+        result = await conn.exec_driver_sql("PRAGMA table_info(profiles);")
+        cols = {r[1] for r in result.fetchall()}  # type: ignore[index]
+        if "description" not in cols:
+            await conn.exec_driver_sql("ALTER TABLE profiles ADD COLUMN description TEXT;")
 
     async def close(self) -> None:
         if self._engine is None:
@@ -210,6 +231,7 @@ class ProfileStore:
         seed_yaml = yaml.safe_dump(
             {
                 "name": "default",
+                "description": "Default profile for /base endpoints",
                 "extractors": ["passport", "inn", "phone"],
                 "placeholder": "[СКРЫТО]",
                 "remove_overlaps": True,
@@ -260,11 +282,14 @@ class ProfileStore:
         activate: bool = False,
         name_hint: str | None = None,
         name_override: str | None = None,
+        description_override: str | None = None,
     ) -> ProfileRecord:
         await self.init()
-        name, definition = parse_profile_yaml(yaml_text, name_hint=name_hint)
+        name, description, definition = parse_profile_yaml(yaml_text, name_hint=name_hint)
         if name_override:
             name = name_override
+        if description_override is not None:
+            description = description_override
 
         if not activate and await self.get_active() is None:
             activate = True
@@ -286,6 +311,7 @@ class ProfileStore:
                     ProfileRow(
                         id=profile_id,
                         name=name,
+                        description=description,
                         yaml=yaml_text,
                         definition_json=definition_json,
                         created_at=now,
@@ -300,6 +326,31 @@ class ProfileStore:
                 raise RuntimeError("Failed to create profile")
             return _row_to_record(row)
 
+    async def create_from_definition(
+        self,
+        *,
+        name: str,
+        description: str | None = None,
+        definition: ProfileDefinition,
+        activate: bool = False,
+    ) -> ProfileRecord:
+        payload: dict[str, Any] = {
+            "name": name,
+            "extractors": definition.extractors,
+            "placeholder": definition.placeholder,
+            "remove_overlaps": definition.remove_overlaps,
+        }
+        if description is not None:
+            payload["description"] = description
+        yaml_text = yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
+        return await self.create_from_yaml(
+            yaml_text,
+            activate=activate,
+            name_hint=name,
+            name_override=name,
+            description_override=description,
+        )
+
     async def update_from_yaml(
         self,
         profile_id: str,
@@ -308,6 +359,7 @@ class ProfileStore:
         activate: bool = False,
         name_hint: str | None = None,
         name_override: str | None = None,
+        description_override: str | None = None,
     ) -> ProfileRecord:
         await self.init()
         current = await self.get(profile_id)
@@ -316,9 +368,15 @@ class ProfileStore:
         if current.is_deleted:
             raise ValueError("Profile is deleted")
 
-        name, definition = parse_profile_yaml(yaml_text, name_hint=name_hint or current.name)
+        name, description, definition = parse_profile_yaml(
+            yaml_text, name_hint=name_hint or current.name
+        )
         if name_override:
             name = name_override
+        if description_override is not None:
+            description = description_override
+        if description is None and description_override is None:
+            description = current.description
 
         now = _utc_now()
         definition_json = json.dumps(definition.model_dump(), ensure_ascii=False)
@@ -338,6 +396,7 @@ class ProfileStore:
                         .where(ProfileRow.id == profile_id, ProfileRow.is_deleted.is_(False))
                         .values(
                             name=name,
+                            description=description,
                             yaml=yaml_text,
                             definition_json=definition_json,
                             updated_at=now,

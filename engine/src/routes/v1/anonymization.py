@@ -2,45 +2,48 @@ from extractors import ExtractionPipeline
 from fastapi import APIRouter, Depends
 from profiles.deps import get_profile_store
 from profiles.store import ProfileStore
-from scheams.processing_schemas import ProcessingBody
+from scheams.processing_schemas import AnonymizedTextResponse, ProcessingBody
 
-anonimization_router = APIRouter(prefix="/anonimization")
+anonimization_router = APIRouter(prefix="/anonimization", tags=["anonimization"])
 
 DEFAULT_BASE_EXTRACTORS = ("passport", "inn", "phone")
 
 
 @anonimization_router.post(
     "/all",
-    description="Возвращает анонимизированный текст по всем существующим экстракторам",
-    tags=[
-        "anonimization",
-    ],
+    summary="Анонимизация по всем детекторам",
+    description="Запускает все доступные детекторы и заменяет найденные сущности на placeholder.",
+    response_model=AnonymizedTextResponse,
+    response_description="Анонимизированный текст",
 )
-async def anonymize_all(body: ProcessingBody) -> str:
+async def anonymize_all(body: ProcessingBody) -> AnonymizedTextResponse:
     pipeline = ExtractionPipeline.from_registry()
-    result = pipeline.anonymize(body.text)
-    return result
+    text = pipeline.anonymize(body.text)
+    return AnonymizedTextResponse(text=text)
 
 
 @anonimization_router.post(
     "/base",
-    description="Возвращает анонимизированный текст по активному профилю (если нет профиля — 'passport', 'inn', 'phone')",
-    tags=[
-        "anonimization",
-    ],
+    summary="Анонимизация по активному профилю",
+    description=(
+        "Использует активный профиль из хранилища (в момент времени активен только один). "
+        "Если активного профиля нет, используется дефолтный набор: passport, inn, phone."
+    ),
+    response_model=AnonymizedTextResponse,
+    response_description="Анонимизированный текст",
 )
 async def anonymize_base(
     body: ProcessingBody,
     store: ProfileStore = Depends(get_profile_store),
-) -> str:
+) -> AnonymizedTextResponse:
     active = await store.get_active()
     extractors = active.definition.extractors if active is not None else list(DEFAULT_BASE_EXTRACTORS)
     placeholder = active.definition.placeholder if active is not None else "[СКРЫТО]"
     remove_overlaps = active.definition.remove_overlaps if active is not None else True
     pipeline = ExtractionPipeline.from_registry(*extractors)
-    result = pipeline.anonymize(
+    text = pipeline.anonymize(
         body.text,
         placeholder=placeholder,
         remove_overlaps=remove_overlaps,
     )
-    return result
+    return AnonymizedTextResponse(text=text)

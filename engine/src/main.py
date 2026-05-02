@@ -4,11 +4,23 @@ from fastapi import FastAPI
 
 from profiles import ProfileStore
 from routes import v1_router
+from scheams.common_schemas import HealthResponse
 
 def create_app(*, profiles_db_path: str | None = None) -> FastAPI:
     app = FastAPI(
         title="Anonymization Engine API",
         version="0.1.0",
+        description=(
+            "Сервис для детекции и анонимизации чувствительных данных. "
+            "Поддерживает профили (YAML), загружаемые из админ-панели, "
+            "и быстрое переключение активного профиля."
+        ),
+        openapi_tags=[
+            {"name": "meta", "description": "Метаданные: детекторы и действия API"},
+            {"name": "profiles", "description": "CRUD профилей (YAML) и активация"},
+            {"name": "processing", "description": "Детекция сущностей в тексте"},
+            {"name": "anonimization", "description": "Анонимизация текста"},
+        ],
     )
 
     app.include_router(v1_router)
@@ -22,9 +34,14 @@ def create_app(*, profiles_db_path: str | None = None) -> FastAPI:
     async def _shutdown() -> None:
         await app.state.profile_store.close()
 
-    @app.get("/")
-    async def home():
-        return {"healthy": "true"}
+    @app.get(
+        "/",
+        summary="Healthcheck",
+        description="Простой healthcheck эндпоинт.",
+        response_model=HealthResponse,
+    )
+    async def home() -> HealthResponse:
+        return HealthResponse(healthy=True)
 
     return app
 

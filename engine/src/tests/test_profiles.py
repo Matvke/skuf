@@ -64,7 +64,7 @@ def test_processing_base_uses_active_profile(tmp_path):
             json={"text": "Почта test@example.com и паспорт 4507 123456"},
         )
         assert r2.status_code == 200, r2.text
-        entities = r2.json()[0]
+        entities = r2.json()["entities"]
         assert entities
         assert all(e["entity_type"] == "EMAIL" for e in entities)
 
@@ -84,5 +84,4 @@ def test_anonymization_base_uses_placeholder(tmp_path):
 
         r2 = client.post("/v1/anonimization/base", json={"text": "test@example.com"})
         assert r2.status_code == 200, r2.text
-        assert r2.json() == "[HIDDEN]"
-
+        assert r2.json()["text"] == "[HIDDEN]"
