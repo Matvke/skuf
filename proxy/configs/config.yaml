@@ -4,18 +4,17 @@ reload_debounce_ms: 500
 targets:
     - name: openai-chat
       match:
-        host: localhost:8080
-        path: /
+        host: ""
+        path: /v1/chat/completions
         methods:
             - POST
-            - GET
       upstream:
         scheme: https
         host: httpbin.org
-        path: /
+        path: /anything
       extract:
         json_paths:
-            - data.chat.messages[*].parts[*].text
+            - messages[*].content
     - name: anthropic-messages
       match:
         host: api.anthropic.com

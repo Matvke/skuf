@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>LLM Proxy Demo Chat</title>
+  <style>
+    :root { --bg:#0b1020; --card:#121a33; --text:#e6e9f2; --muted:#9aa3b2; --accent:#6ea8fe; --danger:#ff6b6b; }
+    body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; background:var(--bg); color:var(--text); }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 18px; }
+    .row { display:flex; gap:12px; flex-wrap:wrap; }
+    .card { background:var(--card); border:1px solid rgba(255,255,255,0.08); border-radius: 14px; padding: 14px; }
+    .card h2 { margin: 0 0 10px 0; font-size: 16px; }
+    label { display:block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+    input, textarea, select { width:100%; box-sizing:border-box; padding:10px; border-radius:10px; border:1px solid rgba(255,255,255,0.12); background:#0c1226; color:var(--text); }
+    textarea { min-height: 84px; resize: vertical; }
+    button { padding:10px 12px; border-radius: 10px; border:1px solid rgba(255,255,255,0.12); background: #1b2a55; color: var(--text); cursor: pointer; }
+    button.primary { background: var(--accent); color:#071022; border-color: transparent; font-weight:600; }
+    button.danger { background: transparent; border-color: rgba(255,107,107,0.5); color: var(--danger); }
+    button:disabled { opacity:0.6; cursor:not-allowed; }
+
+    .chat { height: 54vh; overflow:auto; padding: 12px; background:#0c1226; border-radius: 12px; border:1px solid rgba(255,255,255,0.08); }
+    .msg { margin: 10px 0; display:flex; gap:10px; }
+    .role { min-width: 90px; color: var(--muted); font-size: 12px; padding-top: 3px; }
+    .bubble { flex:1; padding:10px 12px; border-radius: 12px; border:1px solid rgba(255,255,255,0.10); background: rgba(255,255,255,0.03); white-space: pre-wrap; }
+    .user .bubble { border-color: rgba(110,168,254,0.35); }
+    .assistant .bubble { border-color: rgba(255,255,255,0.10); }
+    .system .bubble { border-color: rgba(170,255,170,0.25); color:#d8f7d8; }
+
+    .meta { font-size: 12px; color: var(--muted); margin-top: 8px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="row">
+    <div class="card" style="flex: 1 1 520px;">
+      <h2>Чат</h2>
+      <div id="chat" class="chat"></div>
+
+      <div style="display:flex; gap:10px; margin-top: 12px;">
+        <button id="clearBtn" class="danger" title="Очистить историю">Очистить</button>
+        <div style="flex:1"></div>
+        <button id="sendBtn" class="primary">Отправить</button>
+      </div>
+
+      <label style="margin-top: 10px;">Сообщение</label>
+      <textarea id="input" placeholder="Напиши сообщение..."></textarea>
+
+      <div class="meta">
+        <div>Request ID: <span id="reqId">—</span></div>
+        <div>Статус: <span id="status">—</span></div>
+      </div>
+    </div>
+
+    <div class="card" style="flex: 1 1 360px;">
+      <h2>Настройки</h2>
+
+      <label>Proxy Base URL</label>
+      <input id="baseUrl" placeholder="https://llm-proxy.company.local" />
+
+      <label style="margin-top:10px;">Endpoint path</label>
+      <input id="endpoint" placeholder="/v1/chat/completions" />
+
+      <label style="margin-top:10px;">Model (как пример)</label>
+      <input id="model" placeholder="gpt-4o-mini" />
+
+      <label style="margin-top:10px;">System prompt (опционально)</label>
+      <textarea id="systemPrompt" placeholder="Ты полезный ассистент..."></textarea>
+
+      <label style="margin-top:10px;">Authorization (опционально)</label>
+      <input id="auth" placeholder="Bearer ..." />
+
+      <div style="margin-top:12px; display:flex; gap:10px;">
+        <button id="saveBtn">Сохранить</button>
+        <button id="loadBtn">Загрузить</button>
+      </div>
+
+      <h2 style="margin-top:14px;">Debug (последний запрос/ответ)</h2>
+      <div class="mono" id="debug" style="max-height: 28vh; overflow:auto;"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const el = (id) => document.getElementById(id);
+
+  const chatEl = el("chat");
+  const inputEl = el("input");
+  const sendBtn = el("sendBtn");
+  const clearBtn = el("clearBtn");
+  const baseUrlEl = el("baseUrl");
+  const endpointEl = el("endpoint");
+  const modelEl = el("model");
+  const systemPromptEl = el("systemPrompt");
+  const authEl = el("auth");
+  const debugEl = el("debug");
+  const reqIdEl = el("reqId");
+  const statusEl = el("status");
+
+  let messages = [];
+
+  function render() {
+    chatEl.innerHTML = "";
+    for (const m of messages) {
+      const row = document.createElement("div");
+      row.className = "msg " + m.role;
+
+      const role = document.createElement("div");
+      role.className = "role";
+      role.textContent = m.role;
+
+      const bubble = document.createElement("div");
+      bubble.className = "bubble";
+      bubble.textContent = m.content;
+
+      row.appendChild(role);
+      row.appendChild(bubble);
+      chatEl.appendChild(row);
+    }
+    chatEl.scrollTop = chatEl.scrollHeight;
+  }
+
+  function settings() {
+    return {
+      baseUrl: baseUrlEl.value.trim().replace(/\/+$/, ""),
+      endpoint: endpointEl.value.trim(),
+      model: modelEl.value.trim(),
+      systemPrompt: systemPromptEl.value.trim(),
+      auth: authEl.value.trim(),
+    };
+  }
+
+  function saveSettings() {
+    localStorage.setItem("proxy_demo_settings", JSON.stringify(settings()));
+  }
+
+  function loadSettings() {
+    const raw = localStorage.getItem("proxy_demo_settings");
+    if (!raw) return;
+    const s = JSON.parse(raw);
+    baseUrlEl.value = s.baseUrl || "";
+    endpointEl.value = s.endpoint || "/v1/chat/completions";
+    modelEl.value = s.model || "gpt-4o-mini";
+    systemPromptEl.value = s.systemPrompt || "";
+    authEl.value = s.auth || "";
+  }
+
+  function clearChat() {
+    messages = [];
+    render();
+  }
+
+  function buildRequestBody() {
+    const s = settings();
+
+    // Системное сообщение добавим первым (если задано)
+    const msgList = [];
+    if (s.systemPrompt) {
+      msgList.push({ role: "system", content: s.systemPrompt });
+    }
+    // Далее вся история без системного (чтобы не дублировать)
+    for (const m of messages) {
+      if (m.role === "system") continue;
+      msgList.push({ role: m.role, content: m.content });
+    }
+
+    // OpenAI-style body
+    return {
+      model: s.model || "gpt-4o-mini",
+      messages: msgList,
+      stream: false
+    };
+  }
+
+  function pickAssistantText(respJson) {
+    // Под OpenAI chat.completions:
+    // { choices: [ { message: { content: "..." } } ] }
+    try {
+      const c = respJson?.choices?.[0]?.message?.content;
+      if (typeof c === "string") return c;
+    } catch {}
+    // fallback: если прокси/апстрим вернул {text: "..."} или строку
+    if (typeof respJson === "string") return respJson;
+    if (typeof respJson?.text === "string") return respJson.text;
+    return JSON.stringify(respJson, null, 2);
+  }
+
+  async function sendMessage() {
+    const s = settings();
+    if (!s.baseUrl) {
+      statusEl.textContent = "Ошибка: не задан Proxy Base URL";
+      return;
+    }
+    if (!s.endpoint) {
+      statusEl.textContent = "Ошибка: не задан endpoint path";
+      return;
+    }
+
+    const text = inputEl.value.trim();
+    if (!text) return;
+
+    messages.push({ role: "user", content: text });
+    inputEl.value = "";
+    render();
+
+    const url = s.baseUrl + s.endpoint;
+    const body = buildRequestBody();
+
+    const headers = { "Content-Type": "application/json" };
+    if (s.auth) headers["Authorization"] = s.auth;
+
+    statusEl.textContent = "Отправка...";
+    reqIdEl.textContent = "—";
+    debugEl.textContent = "";
+
+    let res, resText, resJson;
+    try {
+      debugEl.textContent =
+        "POST " + url + "\n\n" +
+        "Request JSON:\n" + JSON.stringify(body, null, 2) + "\n";
+
+      res = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+      });
+
+      const rid = res.headers.get("X-Request-Id");
+      if (rid) reqIdEl.textContent = rid;
+
+      statusEl.textContent = String(res.status) + " " + res.statusText;
+
+      resText = await res.text();
+      try { resJson = JSON.parse(resText); } catch { resJson = resText; }
+
+      debugEl.textContent += "\nResponse:\n" + (typeof resJson === "string" ? resJson : JSON.stringify(resJson, null, 2));
+
+      if (!res.ok) {
+        messages.push({ role: "assistant", content: "Ошибка: " + (typeof resJson === "string" ? resJson : JSON.stringify(resJson)) });
+        render();
+        return;
+      }
+
+      const assistant = pickAssistantText(resJson);
+      messages.push({ role: "assistant", content: assistant });
+      render();
+    } catch (e) {
+      statusEl.textContent = "Ошибка запроса";
+      messages.push({ role: "assistant", content: "Ошибка: " + (e?.message || String(e)) });
+      render();
+    }
+  }
+
+  sendBtn.addEventListener("click", sendMessage);
+  clearBtn.addEventListener("click", clearChat);
+
+  el("saveBtn").addEventListener("click", () => { saveSettings(); statusEl.textContent = "Настройки сохранены"; });
+  el("loadBtn").addEventListener("click", () => { loadSettings(); statusEl.textContent = "Настройки загружены"; });
+
+  inputEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) sendMessage();
+  });
+
+  // defaults
+  loadSettings();
+  if (!baseUrlEl.value) baseUrlEl.value = "http://localhost:8080";
+  if (!endpointEl.value) endpointEl.value = "/v1/chat/completions";
+  if (!modelEl.value) modelEl.value = "gpt-4o-mini";
+  render();
+</script>
+</body>
+</html>

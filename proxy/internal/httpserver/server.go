@@ -46,6 +46,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/health", s.handleHealth)
 	mux.HandleFunc("/api/v1/debug/config", s.handleConfig)
 	mux.HandleFunc("/api/v1/config", s.UpdateConfig)
+	mux.Handle("api/v1/demo", http.StripPrefix("/demo/", http.FileServer(http.Dir("demo"))))
 	mux.HandleFunc("/", s.handleCatchAll)
 
 	var h http.Handler = mux
@@ -102,7 +103,6 @@ func (s *Server) UpdateConfig(w http.ResponseWriter, r *http.Request) {
 
 	s.cfgStore.Set(cfg)
 
-	// Обновляем engine_url если изменился
 	if cfg.EngineUrl != "" {
 		s.engine.SetBaseUrl(cfg.EngineUrl)
 	}

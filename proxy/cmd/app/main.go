@@ -36,14 +36,6 @@ func main() {
 
 	store := config.NewStore(cfg)
 
-	watcher := config.NewWatcher(configPath, store)
-
-	go func() {
-		if err := watcher.Run(context.Background()); err != nil {
-			log.Fatal(err)
-		}
-	}()
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
